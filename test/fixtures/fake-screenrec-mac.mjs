@@ -5,8 +5,12 @@
 // | late-first-frame (first-frame 1.5 s after started, no ms) | first-frame-ms (same, but ms says 0.5 s after started)
 // | bad-png (screenshot reports ok but writes bytes that are not a PNG)
 // | no-frames-locked (warns that the screen is locked before started, then stops with no frames and screen: locked)
+// | serve-hang (record never answers --requests)
+// FAKE_SCREEN sets what `screen` reports (default awake); `screen` answers in every mode, hang included.
+// record --requests DIR answers <id>.req files by running this script with the request's args.
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, execFileSync, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 const [cmd, ...rest] = process.argv.slice(2);
 const mode = process.env.FAKE_HELPER_MODE ?? 'ok';
 const print = (o) => process.stdout.write(JSON.stringify(o) + '\n');
@@ -14,10 +18,29 @@ const flag = (k) => { const i = rest.indexOf(`--${k}`); return i === -1 ? undefi
 const locked = { ok: false, code: 'E_TARGET_NOT_FOUND', message: 'No displays are available: the screen is locked',
   fix: 'Unlock the Mac and try again. For unattended runs, keep the displays awake, for example with "caffeinate -d" running alongside.' };
 
+// Answers recorder requests the way the real helper does: the command's own output line, renamed into place.
+function serve(dir) {
+  if (!dir || mode === 'serve-hang') return;
+  setInterval(() => {
+    for (const name of fs.readdirSync(dir).filter((n) => n.endsWith('.req')).sort()) {
+      const req = path.join(dir, name);
+      const { args } = JSON.parse(fs.readFileSync(req, 'utf8'));
+      fs.rmSync(req);
+      // like the real recorder: a screenshot goes to <id>.png in the request folder, whatever --out says
+      const at = args.indexOf('--out');
+      if (args[0] === 'screenshot' && at !== -1) args[at + 1] = path.join(dir, `${name.slice(0, -4)}.png`);
+      const r = spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...args], { encoding: 'utf8', env: { ...process.env, FAKE_HELPER_MODE: 'ok' } });
+      const res = path.join(dir, `${name.slice(0, -4)}.res`);
+      fs.writeFileSync(`${res}.tmp`, r.stdout.replace(/^\{/, '{"served":true,')); fs.renameSync(`${res}.tmp`, res);
+    }
+  }, 50);
+}
+
 // Each mode sets up its file and signal handlers BEFORE it prints "started", so a stop that arrives
 // right after start (as it can on a loaded machine) meets a fully set-up recorder.
 function record() {
   if (mode === 'record-locked') { print(locked); process.exit(1); }
+  serve(flag('requests'));
   const started = () => { const at = Date.now(); print({ event: 'started', width: 320, height: 240 }); return at; };
   if (mode === 'header-only' || mode === 'crash-early') {
     // a fragmented mov cut before its first fragment: what a helper killed in its first seconds leaves behind
@@ -73,7 +96,8 @@ function record() {
   }, 20);
 }
 
-if (mode === 'hang') setInterval(() => {}, 1000);  // never answers
+if (cmd === 'screen') print({ ok: true, screen: process.env.FAKE_SCREEN ?? 'awake' });
+else if (mode === 'hang') setInterval(() => {}, 1000);  // never answers
 else if (mode === 'locked') { print(locked); process.exit(1); }
 else if (mode === 'no-permission') { print({ ok: false, code: 'E_PERMISSION', message: 'not granted' }); process.exit(1); }
 else if (cmd === 'displays') print({ ok: true, displays: [{ id: 1, name: 'Built-in', x: 0, y: 0, width: 1440, height: 900, scale: 2, main: true }] });

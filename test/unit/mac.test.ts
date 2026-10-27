@@ -3,17 +3,22 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { listDisplays, listWindows, permission, resolveCaptureSpec, captureArgs, recordArgs, ancestorPids, spawnRecord, helperJson,
+import { listDisplays, listWindows, permission, resolveCaptureSpec, captureArgs, recordArgs, ancestorPids, spawnRecord, helperJson, askRecorder, screenState, takeServedPng,
   HELPER_MISSING_FIX, HELPER_FIXES, HELPER_EXIT, recordExitError, assertMac, type RecordOptions } from '../../src/capture/mac.ts';
 import { ScreenrecError } from '../../src/core/errors.ts';
 import type { Display } from '../../src/core/geometry.ts';
 import type { WindowInfo } from '../../src/core/targets.ts';
 
 const fake = new URL('../fixtures/fake-screenrec-mac.mjs', import.meta.url).pathname;
-const saved = { helper: process.env.SCREENREC_MAC_HELPER, mode: process.env.FAKE_HELPER_MODE };
+const saved = { helper: process.env.SCREENREC_MAC_HELPER, mode: process.env.FAKE_HELPER_MODE, screen: process.env.FAKE_SCREEN, home: process.env.SCREENREC_HOME };
 const restore = (k: string, v: string | undefined) => { if (v === undefined) delete process.env[k]; else process.env[k] = v; };
-beforeEach(() => { process.env.SCREENREC_MAC_HELPER = fake; delete process.env.FAKE_HELPER_MODE; });
-afterEach(() => { restore('SCREENREC_MAC_HELPER', saved.helper); restore('FAKE_HELPER_MODE', saved.mode); });
+// an empty state folder: a real recording on this Mac must not answer these tests' helper calls
+let home = '';
+beforeEach(() => { process.env.SCREENREC_MAC_HELPER = fake; delete process.env.FAKE_HELPER_MODE; home = process.env.SCREENREC_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'srh-')); });
+afterEach(() => {
+  restore('SCREENREC_MAC_HELPER', saved.helper); restore('FAKE_HELPER_MODE', saved.mode); restore('FAKE_SCREEN', saved.screen); restore('SCREENREC_HOME', saved.home);
+  fs.rmSync(home, { recursive: true, force: true });
+});
 
 const displays: Display[] = JSON.parse(fs.readFileSync(new URL('../fixtures/two-displays.json', import.meta.url), 'utf8'));
 const win = (id: number, app: string, title: string, x: number, width = 801, height = 501): WindowInfo =>
@@ -135,4 +140,109 @@ test('screenNoFrames: names a locked screen or sleeping displays, and nothing el
 test('assertMac on win32 does not send the user to --tab', () => {
   assert.throws(() => assertMac('win32'), (e: ScreenrecError) => e.code === 'E_UNSUPPORTED_PLATFORM' && !/--tab/.test(e.fix) && /clean-up/.test(e.fix));
   assert.throws(() => assertMac('linux'), (e: ScreenrecError) => e.code === 'E_UNSUPPORTED_PLATFORM' && /--tab/.test(e.fix));
+});
+
+test('recordArgs passes the request folder only when there is one', () => {
+  const o = { out: '/o.mov', fps: 30, maxSeconds: 1, followApp: false, ignoreApps: [], ignorePids: [], marksFile: '/m', t0Ms: 1, logFile: '/l' };
+  const spec = { windowId: 7, sizePx: { width: 2, height: 2 }, cursor: false };
+  assert.deepEqual(recordArgs(spec, { ...o, requestsDir: '/r' }).slice(-2), ['--requests', '/r']);
+  assert.ok(!recordArgs(spec, o).includes('--requests'));
+});
+
+test('the helper reports the screen state; a helper that cannot tell gives null', async () => {
+  assert.equal(await screenState(), 'awake');
+  process.env.FAKE_SCREEN = 'locked';
+  assert.equal(await screenState(), 'locked');
+  process.env.SCREENREC_MAC_HELPER = '/nonexistent/screenrec-mac';
+  assert.equal(await screenState(), null);
+});
+
+test('a helper timeout on a locked screen says the screen is locked, not that a dialog may be waiting', async () => {
+  process.env.FAKE_HELPER_MODE = 'hang'; process.env.FAKE_SCREEN = 'locked';
+  await assert.rejects(helperJson(['windows'], 400, null), (e: ScreenrecError) => e.code === 'E_TARGET_NOT_FOUND'
+    && /did not answer within 0 s: the screen is locked/.test(e.message) && e.fix.startsWith('Unlock the Mac'));
+  process.env.FAKE_SCREEN = 'awake';
+  await assert.rejects(helperJson(['windows'], 400, null), (e: ScreenrecError) => e.code === 'E_HELPER_CRASHED' && /permission dialog/.test(e.message));
+});
+
+/** A stand-in recorder answering requests in `dir` with `answer(args)`. Returns a stop function. */
+function responder(dir: string, answer: (args: string[]) => string) {
+  const t = setInterval(() => {
+    for (const n of fs.readdirSync(dir).filter((f) => f.endsWith('.req'))) {
+      const args = JSON.parse(fs.readFileSync(path.join(dir, n), 'utf8')).args;
+      fs.rmSync(path.join(dir, n));
+      fs.writeFileSync(path.join(dir, n.replace(/\.req$/, '.res')), answer(args));
+    }
+  }, 20);
+  return () => clearInterval(t);
+}
+
+test('while a recorder serves requests, windows and screenshot go to it, not to a new helper process', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'srreq-'));
+  const seen: string[][] = [];
+  const stop = responder(dir, (args) => { seen.push(args); return JSON.stringify({ ok: true, windows: [], served: true }) + '\n'; });
+  try {
+    const r = await helperJson<{ served?: boolean }>(['windows'], 5000, { dir, alive: () => true });
+    assert.equal(r.served, true); assert.deepEqual(seen, [['windows']]);
+    assert.deepEqual(fs.readdirSync(dir), [], 'request and answer files are cleaned up');
+  } finally { stop(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a recorder error answer becomes the same ScreenrecError a helper would give', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'srreq-'));
+  const stop = responder(dir, () => JSON.stringify({ ok: false, code: 'E_NO_FRAMES', message: 'no frame: the screen is locked', fix: 'Unlock the Mac.' }));
+  try {
+    await assert.rejects(helperJson(['screenshot'], 5000, { dir, alive: () => true }), (e: ScreenrecError) => e.code === 'E_NO_FRAMES' && e.fix === 'Unlock the Mac.');
+  } finally { stop(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a recorder that is gone before it answers: the helper runs as usual', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'srreq-'));
+  try {
+    assert.equal(await askRecorder({ dir, alive: () => false }, ['windows'], 5000), null);
+    assert.deepEqual(fs.readdirSync(dir), [], 'the unanswered request is withdrawn');
+    const w = await helperJson<{ windows: unknown[] }>(['windows'], 5000, { dir, alive: () => false });
+    assert.equal(w.windows.length, 2, 'answered by the fake helper itself');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a recorder that never answers times out with the screen-state explanation', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'srreq-'));
+  process.env.FAKE_SCREEN = 'asleep';
+  try {
+    await assert.rejects(askRecorder({ dir, alive: () => true }, ['screenshot'], 300), (e: ScreenrecError) => e.code === 'E_TARGET_NOT_FOUND' && /displays are asleep/.test(e.message));
+    assert.deepEqual(fs.readdirSync(dir), []);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a recorder that never answers while the screen is awake is named, not blamed on a permission dialog', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'srreq-'));
+  try {
+    await assert.rejects(askRecorder({ dir, alive: () => true }, ['windows'], 300),
+      (e: ScreenrecError) => e.code === 'E_HELPER_CRASHED' && /the running recorder did not answer/.test(e.message) && !/permission/.test(e.message));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a missing request folder falls back to the helper quietly', async () => {
+  const gone = path.join(os.tmpdir(), `srreq-gone-${process.pid}`);
+  assert.equal(await askRecorder({ dir: gone, alive: () => true }, ['windows'], 5000), null);
+  const w = await helperJson<{ windows: unknown[] }>(['windows'], 5000, { dir: gone, alive: () => true });
+  assert.equal(w.windows.length, 2);
+});
+
+test('a recorder-written PNG is taken only from the request folder and never replaces a file', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'srpng-'));
+  try {
+    const req = path.join(dir, 'requests'); fs.mkdirSync(req);
+    const shot = path.join(req, '1-2-3.png'); fs.writeFileSync(shot, 'png');
+    const out = path.join(dir, '.out.tmp.png');
+    takeServedPng(shot, out, req);
+    assert.equal(fs.readFileSync(out, 'utf8'), 'png'); assert.ok(!fs.existsSync(shot), 'moved, not copied');
+    fs.writeFileSync(shot, 'again');
+    assert.throws(() => takeServedPng(shot, out, req), (e: NodeJS.ErrnoException) => e.code === 'EEXIST');
+    assert.equal(fs.readFileSync(out, 'utf8'), 'png', 'the existing file is untouched');
+    const elsewhere = path.join(dir, 'secret.png'); fs.writeFileSync(elsewhere, 'x');
+    assert.throws(() => takeServedPng(elsewhere, path.join(dir, 'b.png'), req), (e: ScreenrecError) => e.code === 'E_HELPER_CRASHED');
+    assert.ok(fs.existsSync(elsewhere));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

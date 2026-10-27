@@ -18,6 +18,23 @@ func fail(_ code: String, _ message: String, fix: String? = nil, exitCode: Int32
     exit(exitCode)
 }
 
+/// A failure as a value, for code that must not exit: requests served inside a running recorder.
+struct HelperFailure: Error {
+    let code: String, message: String, fix: String?
+    init(_ code: String, _ message: String, fix: String? = nil) { self.code = code; self.message = message; self.fix = fix }
+    var json: [String: Any] {
+        var obj: [String: Any] = ["ok": false, "code": code, "message": message]
+        if let fix { obj["fix"] = fix }
+        return obj
+    }
+}
+
+/// Exits with a HelperFailure's code, message and fix; any other error is reported as a crash.
+func fail(_ error: Error) -> Never {
+    if let f = error as? HelperFailure { fail(f.code, f.message, fix: f.fix) }
+    fail("E_HELPER_CRASHED", describe(error))
+}
+
 /// Exit codes of `record`, mirrored by HELPER_EXIT in src/capture/mac.ts.
 enum RecordExit {
     static let noFrames: Int32 = 5       // stopped before any frame was written (E_NO_FRAMES)
@@ -109,9 +126,13 @@ func markJSON(t: Double, text: String) -> String {
     return "{\"t\":\(String(format: "%.3f", t)),\"text\":\(quoted)}"
 }
 
+/// Appends one marks line. O_APPEND, like Node's appendFileSync, so a mark written by the helper and a
+/// step note written by `screenrec mark` at the same moment both land, neither over the other.
 func appendMark(_ file: String?, t: Double, text: String) {
     guard let file else { return }
-    if !FileManager.default.fileExists(atPath: file) { FileManager.default.createFile(atPath: file, contents: nil) }
-    guard let h = FileHandle(forWritingAtPath: file) else { return }
-    h.seekToEndOfFile(); h.write(Data((markJSON(t: t, text: text) + "\n").utf8)); h.closeFile()
+    let fd = open(file, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+    guard fd >= 0 else { return }
+    defer { close(fd) }
+    let line = Array((markJSON(t: t, text: text) + "\n").utf8)
+    _ = line.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
 }

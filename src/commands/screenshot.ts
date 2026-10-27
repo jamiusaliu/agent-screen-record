@@ -40,6 +40,9 @@ export const screenshotCommand = (deps: ScreenshotDeps = {}): CommandFn => async
     return { ok: true, text: `screenshot of tab "${tab.title}": ${shot}`, out: shot, ...(warnings.length ? { warnings } : {}) };
   }
   mac.assertMac();
+  // A locked or sleeping screen draws nothing and ScreenCaptureKit can stall meanwhile: say so before asking it.
+  const note = mac.screenNote(await mac.screenState());
+  if (note) throw new ScreenrecError('E_NO_FRAMES', `screenshot not taken: ${note.what}`, note.fix);
   const { spec, label } = mac.resolveCaptureSpec(target, await mac.listDisplays(), await mac.listWindows(), false);
   const w = await writeOut(out, { force, explicit }, (tmp) => mac.screenshot(spec, tmp));
   return { ok: true, text: `screenshot of ${label}: ${w.out}`, ...w.value, out: w.out };

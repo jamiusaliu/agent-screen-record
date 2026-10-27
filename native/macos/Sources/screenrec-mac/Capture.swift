@@ -15,32 +15,37 @@ struct CaptureSpec {
 let maxSidePx = 16384.0
 
 /// Parses an unsigned 32-bit id flag; nil when absent, E_BAD_ARGS when present but not a valid id.
-private func idFlag(_ a: Args, _ k: String) -> UInt32? {
+private func idFlag(_ a: Args, _ k: String) throws -> UInt32? {
     guard let s = a.str(k) else { return nil }
-    guard let v = UInt32(s) else { fail("E_BAD_ARGS", "--\(k) must be a whole number id, got \(s)") }
+    guard let v = UInt32(s) else { throw HelperFailure("E_BAD_ARGS", "--\(k) must be a whole number id, got \(s)") }
     return v
 }
 
-/// Validates every capture flag before any ScreenCaptureKit call, so bad input never traps or captures.
+/// Startup variant of parseSpec: exits with E_BAD_ARGS.
 func makeSpec(_ a: Args) -> CaptureSpec {
-    guard let size = a.nums("size") else { fail("E_BAD_ARGS", "--size W,H is required") }
+    do { return try parseSpec(a) } catch { fail(error) }
+}
+
+/// Validates every capture flag before any ScreenCaptureKit call, so bad input never traps or captures.
+func parseSpec(_ a: Args) throws -> CaptureSpec {
+    guard let size = a.nums("size") else { throw HelperFailure("E_BAD_ARGS", "--size W,H is required") }
     guard size.count == 2, size.allSatisfy({ $0 > 0 && $0 <= maxSidePx && $0 == $0.rounded() }) else {
-        fail("E_BAD_ARGS", "--size needs two whole numbers of pixels from 2 to \(Int(maxSidePx)), got \(a.str("size") ?? "")")
+        throw HelperFailure("E_BAD_ARGS", "--size needs two whole numbers of pixels from 2 to \(Int(maxSidePx)), got \(a.str("size") ?? "")")
     }
-    guard size.allSatisfy({ Int($0) % 2 == 0 }) else { fail("E_BAD_ARGS", "size must be even, got \(Int(size[0]))x\(Int(size[1]))") }
-    let windowID = idFlag(a, "window-id"), displayID = idFlag(a, "display-id")
-    if (windowID == nil) == (displayID == nil) { fail("E_BAD_ARGS", "pass exactly one of --window-id or --display-id") }
+    guard size.allSatisfy({ Int($0) % 2 == 0 }) else { throw HelperFailure("E_BAD_ARGS", "size must be even, got \(Int(size[0]))x\(Int(size[1]))") }
+    let windowID = try idFlag(a, "window-id"), displayID = try idFlag(a, "display-id")
+    if (windowID == nil) == (displayID == nil) { throw HelperFailure("E_BAD_ARGS", "pass exactly one of --window-id or --display-id") }
     var region: CGRect? = nil
     if let r = a.nums("region") {
         guard r.count == 4, r[2] > 0, r[3] > 0 else {
-            fail("E_BAD_ARGS", "--region needs four numbers x,y,w,h with w and h above 0, got \(a.str("region") ?? "")")
+            throw HelperFailure("E_BAD_ARGS", "--region needs four numbers x,y,w,h with w and h above 0, got \(a.str("region") ?? "")")
         }
-        guard windowID == nil else { fail("E_BAD_ARGS", "--region is for display capture only; drop it or use --display-id") }
+        guard windowID == nil else { throw HelperFailure("E_BAD_ARGS", "--region is for display capture only; drop it or use --display-id") }
         region = CGRect(x: r[0], y: r[1], width: r[2], height: r[3])
     }
     var fps = 30
     if let s = a.str("fps") {
-        guard let v = Int(s), (1...120).contains(v) else { fail("E_BAD_ARGS", "--fps must be a whole number from 1 to 120, got \(s)") }
+        guard let v = Int(s), (1...120).contains(v) else { throw HelperFailure("E_BAD_ARGS", "--fps must be a whole number from 1 to 120, got \(s)") }
         fps = v
     }
     return CaptureSpec(windowID: windowID.map { CGWindowID($0) }, displayID: displayID.map { CGDirectDisplayID($0) },
@@ -70,13 +75,19 @@ func tryFilter(windowID: CGWindowID?, displayID: CGDirectDisplayID?, _ content: 
     return SCContentFilter(display: d, excludingWindows: [])
 }
 
-/// Startup variant: exits with E_TARGET_NOT_FOUND.
-func makeFilter(_ spec: CaptureSpec, _ content: SCShareableContent) -> SCContentFilter {
+/// The filter for `spec`, or the failure to report: the screen state when there are no displays,
+/// E_TARGET_NOT_FOUND otherwise.
+func filterFor(_ spec: CaptureSpec, _ content: SCShareableContent) throws -> SCContentFilter {
     do { return try tryFilter(windowID: spec.windowID, displayID: spec.displayID, content) }
     catch TargetError.noDisplays {
         let f = noDisplaysFailure(screenState(), tries: contentQueryTries, permitted: CGPreflightScreenCaptureAccess())
-        fail(f.code, f.message, fix: f.fix)
-    } catch { fail("E_TARGET_NOT_FOUND", error.localizedDescription) }
+        throw HelperFailure(f.code, f.message, fix: f.fix)
+    } catch { throw HelperFailure("E_TARGET_NOT_FOUND", error.localizedDescription) }
+}
+
+/// Startup variant: exits with E_TARGET_NOT_FOUND.
+func makeFilter(_ spec: CaptureSpec, _ content: SCShareableContent) -> SCContentFilter {
+    do { return try filterFor(spec, content) } catch { fail(error) }
 }
 
 func makeConfig(_ spec: CaptureSpec) -> SCStreamConfiguration {
@@ -146,11 +157,13 @@ func isPermissionError(_ error: Error) -> Bool {
     return e.domain == SCStreamErrorDomain && e.code == SCStreamError.Code.userDeclined.rawValue
 }
 
-/// Exits for a stream that failed to start: E_PERMISSION for a refused grant, E_HELPER_CRASHED otherwise.
-func failStart(_ error: Error) -> Never {
-    if isPermissionError(error) { fail("E_PERMISSION", "Screen Recording permission is not granted: \(error.localizedDescription)") }
-    fail("E_HELPER_CRASHED", "startCapture failed: \(describe(error))")
+/// A stream that failed to start: E_PERMISSION for a refused grant, E_HELPER_CRASHED otherwise.
+func startFailure(_ error: Error) -> HelperFailure {
+    if isPermissionError(error) { return HelperFailure("E_PERMISSION", "Screen Recording permission is not granted: \(error.localizedDescription)") }
+    return HelperFailure("E_HELPER_CRASHED", "startCapture failed: \(describe(error))")
 }
+
+func failStart(_ error: Error) -> Never { fail(startFailure(error)) }
 
 /// True only for frames that carry new content (idle and blank frames are skipped).
 func frameComplete(_ sb: CMSampleBuffer) -> Bool {

@@ -1,4 +1,4 @@
-import fs from 'node:fs';
+import fs from 'node:fs'; import path from 'node:path';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -6,6 +6,7 @@ import { ScreenrecError, type ErrorCode } from '../core/errors.ts';
 import { WINDOWS_FIX } from '../core/platform.ts';
 import { displayOfRect, resolveDisplay, regionToPixels, pixelSize, type Display, type Rect } from '../core/geometry.ts';
 import { matchWindow, frontWindowOfApp, parseWindowSelector, type Target, type WindowInfo } from '../core/targets.ts';
+import { readState, isRecorderAlive, stateDir } from '../core/state.ts';
 
 const exec = promisify(execFile);
 
@@ -37,17 +38,98 @@ export const HELPER_FIXES: Partial<Record<ErrorCode, string>> = {
 
 export const HELPER_TIMEOUT_MS = 30_000;
 
-export async function helperJson<T>(args: string[], timeoutMs = HELPER_TIMEOUT_MS): Promise<T> {
+const KEEP_AWAKE = 'For unattended runs, keep the displays awake, for example with "caffeinate -d" running alongside.';
+
+/** What a screen state that draws nothing means and how to fix it (the helper's `screen` values); null when awake or unknown. */
+export function screenNote(screen: unknown): { what: string; fix: string } | null {
+  if (screen === 'locked') return { what: 'the screen is locked', fix: `Unlock the Mac and try again. ${KEEP_AWAKE}` };
+  if (screen === 'asleep') return { what: 'the displays are asleep', fix: `Wake the displays (move the mouse or press a key) and try again. ${KEEP_AWAKE}` };
+  if (screen === 'off-console') return { what: 'another user session is using the screen', fix: "Switch back to this user's session and try again." };
+  return null;
+}
+
+/**
+ * The error for a helper that did not answer within `seconds`. ScreenCaptureKit can stall while the
+ * screen is locked or asleep, so that state, when the helper reports it, is named instead of the
+ * permission-dialog guess.
+ */
+export function helperTimeoutError(seconds: number, screen: unknown): ScreenrecError {
+  const note = screenNote(screen);
+  if (note) return new ScreenrecError('E_TARGET_NOT_FOUND', `helper did not answer within ${seconds} s: ${note.what}, and nothing can be captured until that changes`, note.fix);
+  return new ScreenrecError('E_HELPER_CRASHED', `helper did not answer within ${seconds} s (a macOS permission dialog may be waiting)`,
+    'Look for a Screen Recording dialog and answer it, then try again.');
+}
+
+/**
+ * The error for a running recorder that did not answer within `seconds` (it answers within 20 s itself, so
+ * this means it is stuck): the screen state when that explains it, never the permission-dialog guess.
+ */
+export function recorderTimeoutError(seconds: number, screen: unknown): ScreenrecError {
+  const note = screenNote(screen);
+  if (note) return new ScreenrecError('E_TARGET_NOT_FOUND', `the running recorder did not answer within ${seconds} s: ${note.what}, and nothing can be captured until that changes`, note.fix);
+  return new ScreenrecError('E_HELPER_CRASHED', `the running recorder did not answer within ${seconds} s`,
+    'Try again. If it keeps happening, stop the recording ("screenrec stop"), then run "screenrec doctor" and retry with SCREENREC_DEBUG=1.');
+}
+
+/** Commands a running mac recorder answers itself (native/macos/Sources/screenrec-mac/Requests.swift). */
+const SERVED = new Set(['windows', 'screenshot']);
+
+/** The folder a mac recorder answers requests in (one recording at a time, so always the same). */
+export const requestsFolder = () => path.join(stateDir(), 'requests');
+
+/** A live mac recorder's request folder, and whether that recorder is still running. */
+export interface RecorderRoute { dir: string; alive(): boolean }
+
+/**
+ * Where `windows` and `screenshot` go while a mac recording runs. Another screenrec-mac process that uses
+ * ScreenCaptureKit and quits stops the recorder's stream ("application connection interrupted"; the
+ * recording froze and the screenshot got no frame), so the recorder answers them itself.
+ */
+export function recorderRoute(): RecorderRoute | null {
+  const s = readState();
+  if (!s || s.recovered || s.recoveryError || s.worker !== 'mac' || !s.requests || !isRecorderAlive(s.pid)) return null;
+  return { dir: s.requests, alive: () => isRecorderAlive(s.pid) };
+}
+
+let requestSeq = 0;
+
+/**
+ * Sends `args` to the recorder and returns the line it answers. Null when the recorder is gone before it
+ * answers (the caller then runs the helper itself); throws the timeout error after `timeoutMs`.
+ */
+export async function askRecorder(route: RecorderRoute, args: string[], timeoutMs: number,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)), now: () => number = Date.now): Promise<string | null> {
+  const id = `${process.pid}-${now()}-${++requestSeq}`;
+  const req = path.join(route.dir, `${id}.req`), res = path.join(route.dir, `${id}.res`);
+  try {
+    fs.writeFileSync(`${req}.tmp`, JSON.stringify({ args }), { mode: 0o600 });
+    fs.renameSync(`${req}.tmp`, req);  // the recorder only picks up whole requests
+  } catch {  // the folder is gone or unusable: run the helper as usual
+    fs.rmSync(`${req}.tmp`, { force: true });
+    return null;
+  }
+  const until = now() + timeoutMs;
+  for (let n = 0; ; n++) {
+    if (fs.existsSync(res)) { const text = fs.readFileSync(res, 'utf8'); fs.rmSync(res, { force: true }); return text; }
+    // checked every 0.5 s, not every poll: it runs ps
+    if (n % 10 === 9 && !route.alive()) { fs.rmSync(req, { force: true }); return null; }
+    if (now() >= until) { fs.rmSync(req, { force: true }); throw recorderTimeoutError(Math.round(timeoutMs / 1000), await screenState()); }
+    await sleep(50);
+  }
+}
+
+export async function helperJson<T>(args: string[], timeoutMs = HELPER_TIMEOUT_MS,
+  route: RecorderRoute | null = SERVED.has(args[0]) ? recorderRoute() : null): Promise<T> {
   let stdout = '';
   let failure = '';
-  try { stdout = (await exec(helperPath(), args, { maxBuffer: 16 << 20, timeout: timeoutMs })).stdout; }
+  const answered = route ? await askRecorder(route, args, timeoutMs) : null;
+  if (answered !== null) stdout = answered;
+  else try { stdout = (await exec(helperPath(), args, { maxBuffer: 16 << 20, timeout: timeoutMs })).stdout; }
   catch (e) {
     const err = e as NodeJS.ErrnoException & { stdout?: string; killed?: boolean };
     if (err.code === 'ENOENT') throw new ScreenrecError('E_HELPER_CRASHED', `Helper not found at ${helperPath()}`, HELPER_MISSING_FIX);
-    if (err.killed) {
-      throw new ScreenrecError('E_HELPER_CRASHED', `helper did not answer within ${Math.round(timeoutMs / 1000)} s (a macOS permission dialog may be waiting)`,
-        'Look for a Screen Recording dialog and answer it, then try again.');
-    }
+    // `screen` itself never asks for the screen state, so a stuck helper cannot recurse
+    if (err.killed) throw helperTimeoutError(Math.round(timeoutMs / 1000), args[0] === 'screen' ? null : await screenState());
     stdout = err.stdout ?? '';
     failure = ` (${err.code ?? 'exit'}: ${err.message.split('\n')[0]})`;
   }
@@ -62,6 +144,10 @@ export async function helperJson<T>(args: string[], timeoutMs = HELPER_TIMEOUT_M
   }
   return j;
 }
+
+/** The screen state from the helper ("awake", "locked", "asleep" or "off-console"); null when it cannot tell. No ScreenCaptureKit call. */
+export const screenState = async (timeoutMs = 5000): Promise<string | null> =>
+  (await helperJson<{ screen: string }>(['screen'], timeoutMs).catch(() => null))?.screen ?? null;
 
 export const listDisplays = async () => (await helperJson<{ displays: Display[] }>(['displays'])).displays;
 export const listWindows = async () => (await helperJson<{ windows: WindowInfo[] }>(['windows'])).windows;
@@ -104,8 +190,27 @@ export function captureArgs(spec: CaptureSpec): string[] {
   return a;
 }
 
+/**
+ * One PNG at `out` (a temp file the caller publishes). A running recorder writes it into its request
+ * folder instead, whatever --out says; it is moved to `out` here, never over an existing file.
+ */
 export async function screenshot(spec: CaptureSpec, out: string) {
-  return helperJson<{ out: string; width: number; height: number }>(['screenshot', ...captureArgs(spec), '--out', out]);
+  const r = await helperJson<{ out: string; width: number; height: number }>(['screenshot', ...captureArgs(spec), '--out', out]);
+  if (r.out !== out) { takeServedPng(r.out, out); r.out = out; }
+  return r;
+}
+
+/** Moves a recorder-written PNG (only from the request folder) to `out`, which must not exist yet. */
+export function takeServedPng(from: string, out: string, dir: string = requestsFolder()): void {
+  if (path.dirname(from) !== dir || !/^[\w.-]+\.png$/.test(path.basename(from))) {
+    throw new ScreenrecError('E_HELPER_CRASHED', `The recorder answered with an unexpected file: ${from}`, 'Re-run with SCREENREC_DEBUG=1 and report the output.');
+  }
+  try { fs.linkSync(from, out); }
+  catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'EEXIST') { fs.rmSync(from, { force: true }); throw e; }
+    fs.copyFileSync(from, out, fs.constants.COPYFILE_EXCL);  // another volume: copy, still never replacing
+  }
+  fs.rmSync(from, { force: true });
 }
 
 function ppid(pid: number): number | null {
@@ -122,6 +227,8 @@ export function ancestorPids(pid: number = process.pid, ppidOf: (pid: number) =>
 export interface RecordOptions {
   out: string; fps: number; maxSeconds: number; followApp: boolean; ignoreApps: string[];
   ignorePids: number[]; marksFile: string; t0Ms: number; logFile: string;
+  /** Folder the recorder answers `windows` and `screenshot` requests in (see recorderRoute). */
+  requestsDir?: string;
 }
 
 export function recordArgs(spec: CaptureSpec, o: RecordOptions): string[] {
@@ -129,7 +236,8 @@ export function recordArgs(spec: CaptureSpec, o: RecordOptions): string[] {
     '--marks', o.marksFile, '--t0-ms', String(o.t0Ms),
     ...(o.followApp ? ['--follow-app'] : []),
     ...o.ignoreApps.flatMap((a) => ['--ignore-app', a]),
-    ...o.ignorePids.flatMap((p) => ['--ignore-pid', String(p)])];
+    ...o.ignorePids.flatMap((p) => ['--ignore-pid', String(p)]),
+    ...(o.requestsDir ? ['--requests', o.requestsDir] : [])];
 }
 
 export function spawnRecord(spec: CaptureSpec, o: RecordOptions): number {

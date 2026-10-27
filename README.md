@@ -182,10 +182,10 @@ Every command takes `--json`. On failure it prints `{ "ok": false, "code", "mess
 | `screenrec doctor` | Checks the setup and prints a fix for each problem |
 | `screenrec list windows\|displays\|tabs` | Lists targets with their ids (`tabs` accepts `--cdp`) |
 | `screenrec start <target>` | Starts one recording. `--out` (an `.mp4`), `--force`, `--fps` (30; a whole number from 1 to 120), `--cursor` (hidden by default), `--max` (10m; from 1s to 24h), `--no-meta`, `--follow-app` (with `--window` or `--app`), `--ignore-app` (with `--follow-app`), `--cdp` (with `--tab`). A flag that does not apply to the target is refused |
-| `screenrec status` | Running or idle, target, elapsed time, output path; for a window or app recording, `targetState` is `hidden` while the window is minimized, hidden or closed (the last frame is held) and `visible` otherwise |
+| `screenrec status` | Running or idle, target, elapsed time, output path; for a window or app recording, `targetState` is `hidden` while the window is minimized, hidden or closed (the last frame is held) and `visible` otherwise; `screen` is `locked`, `asleep` or `off-console` while the Mac screen is not drawn (nothing is captured meanwhile) |
 | `screenrec mark "<text>"` | Adds a timestamped step note (`screenrec mark -- "-x"` for text that starts with a dash) |
-| `screenrec stop` | Finalises `<name>.mp4` and its `<name>.json` sidecar |
-| `screenrec screenshot <target>` | One PNG (a tab needs `url:` or `title:`) |
+| `screenrec stop` | Finalises `<name>.mp4` and its `<name>.json` sidecar; `warnings` names any stretch where the screen was locked or asleep (frozen or blank in the video, also marked in the sidecar as "screen locked" / "screen unlocked") |
+| `screenrec screenshot <target>` | One PNG (a tab needs `url:` or `title:`); works during a recording |
 | `screenrec squeeze <in> [--hold 0.5]` | Keeps each still stretch for at most `--hold` seconds (`0` keeps one frame) and re-times the step notes |
 | `screenrec crop <in> --rect x,y,w,h` or `--trim-edges N` | Crops in output pixels, or removes an N pixel border |
 | `screenrec blur <in> --box x,y,w,h[@from-to]` or `--boxes file.json` | Pixelates, then blurs; boxes can be timed or keyframed ([example](examples/blur-boxes.json)). A box without `@from-to` (or `from`/`to`) covers the whole video; a keyframed box without them is held at its first keyframe before it and at its last after it. A box whose window starts at or after the end of the video, or in its last frame interval (at least the last 0.1 s), is refused |
@@ -272,6 +272,8 @@ Use one route per Chrome session.
 - **The sidecar is sensitive.** `<name>.json` next to each recording holds window titles, URLs and step notes. Keep secrets out of `mark`; `--no-meta` skips the sidecar.
 - **Nothing is overwritten by accident.** Clean-up commands never overwrite their input; without `--out` they pick a new name (`<in>.<command>.<ext>`, then `-2`, `-3`). An explicit `--out` that already exists, or whose `.json` sidecar would replace an existing file, is refused. Add `--force` to replace it; `--force` never replaces the input (or a link to it), and `--force` without `--out` is refused. Output is written to a temporary file and moved into place only on success, so a failed run leaves the old file alone.
 - **The macOS recording indicator is never hidden.** The MCP tools tell the agent to say in chat when it starts and stops recording.
+- **A locked screen is not recorded.** While a capture runs and the screen is locked, macOS shows "Your screen is being observed" on the lock screen; that is macOS's own notice, and nothing is captured while the screen is locked.
+- **A running recording takes screenshots for other programs of yours.** While a recording runs, programs running as your user can ask it for a screenshot of any window or display; it writes only into screenrec's private state folder, never to a path the request names.
 
 ## Troubleshooting
 
@@ -306,7 +308,7 @@ From [docs/TESTED.md](docs/TESTED.md), which holds every real-machine claim with
 - Chrome asks for Allow on every new connection, which is why the broker exists. A crashed broker is replaced on next use, which costs one more Allow.
 - `--tab newest` and `--tab follow` cannot tell your tabs from the agent's (see [Chrome](#chrome)). If attaching to a new tab fails and that page never changes, the recording stays on the previous tab until the page loads or changes.
 - One recording at a time, one display per recording, no audio.
-- Known issue (27 Oct 2026, fix in progress): `screenshot` fails with `E_NO_FRAMES` while a recording is running. A screen locked in the middle of a recording is not reported by `status` or `stop`; that stretch of the video is frozen.
+- Fixed on 27 Oct 2026 but not yet rechecked on a real machine: a screenshot during a recording, and reporting a screen locked in the middle of a recording (see [docs/TESTED.md](docs/TESTED.md)).
 
 ## Platforms
 

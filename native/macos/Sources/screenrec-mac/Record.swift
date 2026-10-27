@@ -189,14 +189,20 @@ private actor Session {
     }
 }
 
-/// Samples the screen state once a second while recording and remembers the worst one seen
-/// (by ScreenState.rank); nil while it has always been awake.
-private final class ScreenWatch: @unchecked Sendable {  // unchecked: `seen` is guarded by `lock`
+/// Samples the screen state once a second while recording. It remembers the worst state seen (by
+/// ScreenState.rank; nil while always awake) and reports each change to `onChange` with the previous
+/// state, so a lock in the middle of a recording shows up in status and in the step notes.
+/// Polling rather than the com.apple.screenIsLocked notifications: one screenState() call covers lock,
+/// display sleep and fast user switching alike, and needs no run loop of its own.
+private final class ScreenWatch: @unchecked Sendable {  // unchecked: `seen` and `last` are guarded by `lock`
     private let lock = NSLock()
     private var seen: ScreenState?
+    private var last = ScreenState.awake
+    private let onChange: @Sendable (_ from: ScreenState, _ to: ScreenState) -> Void
     private let timer = DispatchSource.makeTimerSource(queue: .global())
 
-    init() {
+    init(onChange: @escaping @Sendable (_ from: ScreenState, _ to: ScreenState) -> Void) {
+        self.onChange = onChange
         timer.schedule(deadline: .now() + 1, repeating: 1)
         timer.setEventHandler { [weak self] in _ = self?.check() }
         timer.resume()
@@ -205,8 +211,9 @@ private final class ScreenWatch: @unchecked Sendable {  // unchecked: `seen` is 
     @discardableResult
     func check() -> ScreenState {
         let s = screenState()
-        lock.lock(); defer { lock.unlock() }
+        lock.lock(); defer { lock.unlock() }  // held through onChange, so two changes are reported in order
         if s.rank > (seen?.rank ?? 0) { seen = s }
+        if s != last { onChange(last, s); last = s }
         return s
     }
 
@@ -232,6 +239,7 @@ func record(_ a: Args) async {
     let ignorePids = Set(a.all("ignore-pid").compactMap { Int32($0) })
     let ignoreApps = Set(a.all("ignore-app").map { $0.lowercased() })
     let t0 = (a.double("t0-ms") ?? Date().timeIntervalSince1970 * 1000) / 1000
+    let marks = a.str("marks")
 
     // Signals are handled from the start: one that arrives during startup exits with a "stopped" event.
     let stopper = Stopper()
@@ -249,7 +257,7 @@ func record(_ a: Args) async {
     catch { fail("E_HELPER_CRASHED", "cannot write \(outPath): \(error.localizedDescription)", fix: outputFolderFix, exitCode: RecordExit.writerFailed) }
 
     let session = Session(spec: spec, recorder: recorder, stopper: stopper, follow: follow,
-                          ignorePids: ignorePids, ignoreApps: ignoreApps, marks: a.str("marks"), t0: t0, content: content)
+                          ignorePids: ignorePids, ignoreApps: ignoreApps, marks: marks, t0: t0, content: content)
     recorder.onStreamError = { error in Task { await session.restart(after: error) } }
     recorder.onWriterFailed = { stopper.fire("stream-error") }
     // Running from here on: once capture starts, a stop must finalise whatever frames were written.
@@ -257,12 +265,21 @@ func record(_ a: Args) async {
     do { try await session.start() } catch { failStart(error) }
     dog.disarm()
     // A locked or sleeping screen still starts a stream, but it delivers nothing: say so before "started".
-    let screen = ScreenWatch()
+    let screen = ScreenWatch { from, to in
+        // On the recording clock like every other mark. The "screen" event (with the same t) is what status
+        // and stop read, so an agent's own note that happens to say "screen locked" never counts as a lock.
+        let t = ((Date().timeIntervalSince1970 - t0) * 1000).rounded() / 1000
+        if let text = screenMark(from: from, to: to) { appendMark(marks, t: t, text: text) }
+        emit(["event": "screen", "state": to.rawValue, "t": t])
+    }
     if let why = screenWarning(screen.check()) { emit(["event": "warning", "message": why]) }
     recorder.announceStarted(width: spec.width, height: spec.height)
 
     if let max = a.double("max-seconds") { DispatchQueue.global().asyncAfter(deadline: .now() + max) { stopper.fire("max") } }
     Thread.detachNewThread { while let line = readLine() { if line.trimmingCharacters(in: .whitespaces) == "stop" { stopper.fire("stdin"); return } } }
+
+    // Screenshots and window listings for the rest of screenrec, answered here (see Requests.swift).
+    let server = a.str("requests").map { serveRequests(in: $0) }
 
     let watcher = Task {
         guard spec.windowID != nil else { return }
@@ -274,6 +291,7 @@ func record(_ a: Args) async {
 
     let reason = await stopper.wait()
     watcher.cancel()
+    server?.cancel()
     screen.stop()
     await session.stop()
     let result = await recorder.finish()

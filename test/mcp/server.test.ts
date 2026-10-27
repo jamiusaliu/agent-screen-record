@@ -151,6 +151,45 @@ test('record_start, record_mark, record_status, record_stop with a preview image
   assert.equal(json(await call('record_status')).recording, false);
 });
 
+test('mid-recording: screenshot is answered by the recorder; status and stop report a lock (macOS)', { skip: !mac }, async () => {
+  const started = json(await call('record_start', { window: 'Finder', out: '~/locked.mp4' }));
+  const base = (started.out as string).replace(/\.mp4$/, '');
+  const requests = path.join(process.env.SCREENREC_HOME!, 'requests');
+  try {
+    // the recorder takes the screenshot itself: a second helper process quitting would stop its stream
+    const shot = json(await call('screenshot', { window: 'Finder', out: '~/mid.png' }));
+    assert.equal(shot.ok, true, JSON.stringify(shot)); assert.equal(shot.served, true, 'answered by the running recorder');
+    assert.equal(shot.out, path.join(home, 'mid.png')); assert.ok(fs.existsSync(shot.out));
+    assert.deepEqual(fs.readdirSync(requests), [], 'the PNG was moved out of the request folder');
+    // an existing out is still refused without force, although the recorder never sees that path
+    const taken = json(await call('screenshot', { window: 'Finder', out: '~/mid.png' }));
+    assert.equal(taken.code, 'E_BAD_ARGS'); assert.match(taken.message, /already exists/);
+    // an agent's own step note with the same words is not a lock
+    assert.equal(json(await call('record_mark', { text: 'screen locked' })).ok, true);
+    // what the helper writes when the screen locks: a screen event (with t) in the log, a mark on the recording clock
+    const t = (Date.now() - JSON.parse(fs.readFileSync(path.join(process.env.SCREENREC_HOME!, 'state.json'), 'utf8')).startedAt) / 1000;
+    fs.appendFileSync(`${base}.rec.log`, JSON.stringify({ event: 'screen', state: 'locked', t }) + '\n');
+    fs.appendFileSync(`${base}.marks.jsonl`, JSON.stringify({ t, text: 'screen locked' }) + '\n');
+    const st = json(await call('record_status'));
+    assert.equal(st.screen, 'locked'); assert.match(st.text, /warning: the screen is locked: nothing is being captured/);
+    process.env.FAKE_SCREEN = 'locked';
+    const refused = json(await call('screenshot', { window: 'Finder', out: '~/refused.png' }));
+    assert.equal(refused.code, 'E_NO_FRAMES'); assert.match(refused.message, /screenshot not taken: the screen is locked/); assert.match(refused.fix, /^Unlock the Mac/);
+    delete process.env.FAKE_SCREEN;
+    await new Promise((r) => setTimeout(r, 2200));
+    fs.appendFileSync(`${base}.rec.log`, JSON.stringify({ event: 'screen', state: 'awake', t: t + 2 }) + '\n');
+    fs.appendFileSync(`${base}.marks.jsonl`, JSON.stringify({ t: t + 2, text: 'screen unlocked' }) + '\n');
+    assert.equal(json(await call('record_status')).screen, undefined, 'no screen field once it is drawn again');
+    await new Promise((r) => setTimeout(r, 300));
+  } finally { delete process.env.FAKE_SCREEN; }
+  const stop = json(await call('record_stop'));
+  assert.equal(stop.warnings?.length, 1, JSON.stringify(stop));
+  assert.match(stop.warnings[0], /^the screen was locked for 2s \(\d:\d\d to \d:\d\d in the video\); that part of the video is frozen or blank$/);
+  assert.match(stop.text, /\nwarning: the screen was locked/);
+  const marks = JSON.parse(fs.readFileSync(stop.sidecar, 'utf8')).marks.map((m: { text: string }) => m.text);
+  assert.deepEqual(marks, ['screen locked', 'screen locked', 'screen unlocked'], 'the agent note and the two helper marks');
+});
+
 test('force: every tool with out advertises a boolean force; an existing out is refused unless force is true', async () => {
   const { tools } = await client.listTools();
   for (const n of ['record_start', 'screenshot', 'video_squeeze', 'video_crop', 'video_blur', 'video_trim', 'video_gif', 'video_frame']) {

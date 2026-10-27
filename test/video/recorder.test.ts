@@ -1,11 +1,12 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path';
-import { startRecording, stopRecording, recordingStatus, addMark, realDeps, type RecorderDeps } from '../../src/recorder.ts';
+import { startRecording, stopRecording, recordingStatus, addMark, realDeps, LISTING_SETTLE_MS, type RecorderDeps } from '../../src/recorder.ts';
 import { superviseSpawn } from '../../src/capture/supervise.ts';
 import { readSidecar } from '../../src/core/sidecar.ts';
 import { readState, writeState } from '../../src/core/state.ts';
 import { ScreenrecError } from '../../src/core/errors.ts';
+import { helperJson, listWindows } from '../../src/capture/mac.ts';
 import { makeVideo } from './helpers.ts';
 
 const fake = new URL('../fixtures/fake-screenrec-mac.mjs', import.meta.url).pathname;
@@ -505,4 +506,45 @@ test('start without ffprobe also fails with E_NO_FFMPEG before anything is recor
       (e: ScreenrecError) => e.code === 'E_NO_FFMPEG' && /ffprobe/.test(e.message));
   } finally { if (saved === undefined) delete process.env.SCREENREC_FFPROBE; else process.env.SCREENREC_FFPROBE = saved; }
   assert.equal(readState(), null);
+});
+
+test('while recording, window listings go to the recorder; one that never answers times out naming a locked screen', async () => {
+  await startRecording(opts(), deps());
+  const dir = readState()!.requests!;
+  assert.ok(fs.statSync(dir).isDirectory()); assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
+  assert.equal((await helperJson<{ served?: boolean }>(['windows'])).served, true);
+  assert.equal((await listWindows()).length, 2);
+  await sleep(300);
+  await stopRecording(deps());
+  assert.equal((await helperJson<{ served?: boolean }>(['windows'])).served, undefined, 'no recording: the helper runs itself');
+
+  process.env.FAKE_HELPER_MODE = 'serve-hang';
+  await startRecording(opts(), deps());
+  process.env.FAKE_SCREEN = 'locked';
+  try {
+    await assert.rejects(helperJson(['windows'], 600), (e: ScreenrecError) => e.code === 'E_TARGET_NOT_FOUND' && /the screen is locked/.test(e.message));
+  } finally { delete process.env.FAKE_SCREEN; }
+  await sleep(300);
+  await stopRecording(deps());
+});
+
+test('the recorder starts only after a window listing has had time to quit; display targets list no windows', async () => {
+  const events: string[] = [];
+  const spy = (): RecorderDeps => deps({
+    sleep: async (ms) => { if (ms >= 100) events.push(`sleep ${ms}`); await realDeps.sleep(ms); },
+    mac: { ...realDeps.mac,
+      listWindows: async () => { events.push('windows'); return realDeps.mac.listWindows(); },
+      spawnRecord: (spec, o) => { events.push('spawn'); return realDeps.mac.spawnRecord(spec, o); } },
+  });
+  await startRecording(opts(), spy());
+  assert.equal(events[0], 'windows'); assert.equal(events.at(-1), 'spawn');
+  const wait = Number(events.find((e) => e.startsWith('sleep'))?.split(' ')[1]);
+  assert.ok(wait > LISTING_SETTLE_MS - 300 && wait <= LISTING_SETTLE_MS, `settle wait ${wait}`);
+  await sleep(300);
+  await stopRecording(deps());
+  events.length = 0;
+  await startRecording(opts({ target: { kind: 'display', display: 'main' } }), spy());
+  assert.deepEqual(events, ['spawn'], 'no window listing and no wait for a display');
+  await sleep(300);
+  await stopRecording(deps());
 });

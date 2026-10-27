@@ -68,6 +68,40 @@ func screenWarning(_ state: ScreenState) -> String? {
     }
 }
 
+/// The automatic mark for a change of screen state during a recording; nil when nothing changed.
+/// Going to a state that is not drawn names that state; coming back to awake names what ended.
+/// The marks are for whoever reads the sidecar; status and stop count locks from the "screen" events instead.
+func screenMark(from old: ScreenState, to new: ScreenState) -> String? {
+    guard old != new else { return nil }
+    switch new {
+    case .locked: return "screen locked"
+    case .asleep: return "displays asleep"
+    case .offConsole: return "another user session took the screen"
+    case .awake:
+        switch old {
+        case .locked: return "screen unlocked"
+        case .asleep: return "displays awake"
+        case .offConsole: return "back on this user session"
+        case .awake: return nil
+        }
+    }
+}
+
+/// Code, message and fix for a screenshot whose stream delivered no frame. `onScreen` is the window's
+/// on-screen flag from the content query (nil for a display); `streamError` is set when ScreenCaptureKit
+/// stopped the stream. Only a window that is really off screen is blamed on minimizing or Spaces.
+func noFrameFailure(_ state: ScreenState, onScreen: Bool?, streamError: String?) -> (code: String, message: String, fix: String) {
+    if let why = screenWarning(state) { return ("E_NO_FRAMES", "no frame: \(why)", noDisplaysFailure(state, tries: 1).fix ?? keepAwakeHint) }
+    let retry = "Try again. If it keeps happening, run \"screenrec doctor\" and retry with SCREENREC_DEBUG=1."
+    if let e = streamError { return ("E_NO_FRAMES", "no frame: ScreenCaptureKit stopped the capture: \(e)", retry) }
+    if onScreen == false {
+        return ("E_NO_FRAMES", "no frame within 3 s: the window is minimized, hidden or on another Space",
+                "Un-minimize the window or move it to the current Space, then try again.")
+    }
+    let what = onScreen == nil ? "the display" : "the window, which macOS lists as on screen,"
+    return ("E_NO_FRAMES", "no frame within 3 s from \(what) although the screen is awake and unlocked", retry)
+}
+
 /// Whether another content query is worth it. A refused permission never changes by waiting, and a
 /// locked or sleeping screen will not come back within the retry window, so only an awake screen retries:
 /// after a failed query, or when a display capture got a list without displays.

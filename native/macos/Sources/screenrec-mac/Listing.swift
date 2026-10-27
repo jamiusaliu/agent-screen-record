@@ -86,6 +86,9 @@ struct ContentBox: @unchecked Sendable { let content: SCShareableContent }
 /// pile more queries on top (they would queue behind it in ScreenCaptureKit).
 final class StuckQueries: @unchecked Sendable {  // unchecked: `count` is guarded by `lock`
     static let shared = StuckQueries()
+    /// Queries made for other processes' requests (Requests.swift), kept apart so a stuck one never
+    /// pauses the recorder's own window checks.
+    static let served = StuckQueries()
     private let lock = NSLock()
     private var count = 0
     func add() { lock.lock(); count += 1; lock.unlock() }
@@ -95,7 +98,7 @@ final class StuckQueries: @unchecked Sendable {  // unchecked: `count` is guarde
 
 /// Lists shareable content under the query lock. With `timeout`, gives up after that many seconds:
 /// it throws QueryTimeout, gives the lock back and leaves the stuck query behind (see StuckQueries).
-func queryContent(timeout: Double? = nil) async throws -> SCShareableContent {
+func queryContent(timeout: Double? = nil, stuck: StuckQueries = .shared) async throws -> SCShareableContent {
     let qlock = QueryLock(path: lockPath())
     let work = Task { () throws -> ContentBox in
         defer { qlock.release() }
@@ -109,32 +112,39 @@ func queryContent(timeout: Double? = nil) async throws -> SCShareableContent {
         let once = Once()
         Task {
             let r = await work.result
-            if !once.run({ c.resume(with: r) }) { StuckQueries.shared.remove() }  // a late answer to a timed-out query
+            if !once.run({ c.resume(with: r) }) { stuck.remove() }  // a late answer to a timed-out query
         }
         DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-            if once.run({ work.cancel(); qlock.release(); c.resume(throwing: QueryTimeout(seconds: timeout)) }) { StuckQueries.shared.add() }
+            if once.run({ work.cancel(); qlock.release(); c.resume(throwing: QueryTimeout(seconds: timeout)) }) { stuck.add() }
         }
     }
     return box.content
 }
 
-/// Exits for a content query that failed: E_PERMISSION for a refused grant, otherwise the real cause
+/// A content query that failed: E_PERMISSION for a refused grant, otherwise the real cause
 /// (domain and code), plus the screen state when the screen is locked or asleep.
-func failQuery(_ error: Error) -> Never {
-    if isPermissionError(error) { fail("E_PERMISSION", "Screen Recording permission is not granted: \(error.localizedDescription)") }
+func queryFailure(_ error: Error) -> HelperFailure {
+    if isPermissionError(error) { return HelperFailure("E_PERMISSION", "Screen Recording permission is not granted: \(error.localizedDescription)") }
     let note = screenWarning(screenState()).map { "; \($0)" } ?? ""
-    fail("E_HELPER_CRASHED", "ScreenCaptureKit could not list content: \(describe(error))\(note)")
+    return HelperFailure("E_HELPER_CRASHED", "ScreenCaptureKit could not list content: \(describe(error))\(note)")
 }
+
+func failQuery(_ error: Error) -> Never { fail(queryFailure(error)) }
 
 func shareable() async -> SCShareableContent {
     do { return try await queryContent() } catch { failQuery(error) }
 }
 
+/// The content for a capture, exiting on failure. The start watchdog bounds the whole wait.
+func shareableForCapture(_ spec: CaptureSpec) async -> SCShareableContent {
+    do { return try await contentForCapture(spec) } catch { fail(error) }
+}
+
 /// The content for a capture. A failed query, or a display capture that got no displays, is retried
 /// (contentQueryTries times, contentQueryDelay apart) while the screen is awake and unlocked: those are
-/// the transient cases. The start watchdog still bounds the whole wait.
-func shareableForCapture(_ spec: CaptureSpec) async -> SCShareableContent {
-    let r: Result<ContentBox, Error> = await retrying(tries: contentQueryTries, delay: contentQueryDelay, again: { r in
+/// the transient cases. Each query gives up after `timeout` seconds when one is given; `tries` 1 asks once.
+func contentForCapture(_ spec: CaptureSpec, timeout: Double? = nil, tries: Int = contentQueryTries, stuck: StuckQueries = .shared) async throws -> SCShareableContent {
+    let r: Result<ContentBox, Error> = await retrying(tries: tries, delay: contentQueryDelay, again: { r in
         switch r {
         case .failure(let e):
             return shouldRetryQuery(failed: true, permission: isPermissionError(e), displaysEmpty: false, wantsDisplay: false, state: screenState())
@@ -143,11 +153,11 @@ func shareableForCapture(_ spec: CaptureSpec) async -> SCShareableContent {
             return shouldRetryQuery(failed: false, permission: false, displaysEmpty: true, wantsDisplay: true, state: screenState())
         }
     }) {
-        do { return .success(ContentBox(content: try await queryContent())) } catch { return .failure(error) }
+        do { return .success(ContentBox(content: try await queryContent(timeout: timeout, stuck: stuck))) } catch { return .failure(error) }
     }
     switch r {
     case .success(let box): return box.content
-    case .failure(let e): failQuery(e)
+    case .failure(let e): throw queryFailure(e)
     }
 }
 

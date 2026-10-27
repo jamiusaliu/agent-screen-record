@@ -450,3 +450,23 @@ Changes made during the build and review, each decided with the user:
   (see 6.1); `status` reports `targetState`.
 - Section 7: keyframed blur boxes are held over the whole video.
 - Section 10: no hosted CI in v1.
+
+### Amendments (27 Oct 2026)
+
+- `status` (and `record_status`) reports `screen`: `locked`, `asleep` or
+  `off-console` while the Mac screen is not drawn, with a warning in `text`.
+  The field is absent while the screen is awake.
+- The mac helper writes automatic marks when the screen stops being drawn and
+  when it comes back ("screen locked", "screen unlocked", "displays asleep",
+  "displays awake", "another user session took the screen", "back on this user
+  session"), on the recording clock like other marks. The sidecar stays
+  version 1; only marks are added. `stop` gives `warnings` with the length and
+  position of each frozen or blank stretch, counted from the helper's `screen`
+  log events (not from mark text, so a step note cannot fake a lock); a stretch
+  under 1.5 s is not reported.
+- While a mac recording runs, `screenshot` and window listings are answered by
+  the recorder process itself (`record --requests`), each within 20 s. The
+  recorder writes a requested PNG only into its 0700 request folder, as a new
+  file; Node moves it into place under the usual output rules. A second helper process
+  that used ScreenCaptureKit and quit stopped the recorder's stream on
+  macOS 26.7, which froze the recording and left the screenshot without a frame.

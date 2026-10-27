@@ -22,8 +22,11 @@ export interface StartOptions {
   /** Called once if the Chrome broker takes long to start (usually the Allow dialog). */
   onAllowWait?: () => void;
 }
-/** `recovered` is true when stop returns a recording that status or start had already finalised. */
-export interface StopResult { out: string; durationSec: number; sidecar?: string; reason: string; recovered?: boolean }
+/**
+ * `recovered` is true when stop returns a recording that status or start had already finalised.
+ * `warnings` names stretches where the screen was locked, asleep or taken by another session.
+ */
+export interface StopResult { out: string; durationSec: number; sidecar?: string; reason: string; recovered?: boolean; warnings?: string[] }
 export interface StartResult { out: string; pid: number; worker: 'mac' | 'cdp'; target: string; warnings: string[]; recovered?: StopResult }
 
 export interface RecorderDeps {
@@ -97,6 +100,80 @@ export function screenNoFrames(screen: unknown): { message: string; fix: string 
   if (screen === 'asleep') return { message: 'The recording captured no frames: the displays were asleep', fix: `Wake the displays and record again. ${KEEP_AWAKE}` };
   if (screen === 'off-console') return { message: 'The recording captured no frames: another user session was using the screen', fix: "Switch back to this user's session and record again." };
   return null;
+}
+
+/** A screen state that draws nothing, as the helper reports it in "screen" events and stopped.screen. */
+export type ScreenOff = 'locked' | 'asleep' | 'off-console';
+const SCREEN_RANK: Record<ScreenOff, number> = { asleep: 1, locked: 2, 'off-console': 3 };  // ScreenState.rank in the helper
+
+/** One "screen" event from the helper's log: the new state and when, in seconds on the video clock. */
+export interface ScreenChange { t: number; state: string }
+
+/** Shorter stretches are not reported: no one locks and unlocks a Mac that fast, so they are a lock that ended as the video began. */
+export const MIN_GAP_SEC = 1.5;
+
+/**
+ * Stretches of the video (seconds) while the screen was not drawn, from the helper's "screen" events,
+ * never from mark text (an agent may write the note "screen locked" itself). A stretch still open at
+ * the end runs to `durationSec`; times before the first frame count from 0, and a stretch shorter than
+ * MIN_GAP_SEC is dropped (a lock that was on when the recording started ends as the first frame arrives).
+ */
+export function screenGaps(changes: ScreenChange[], durationSec: number): { state: ScreenOff; from: number; to: number }[] {
+  const gaps: { state: ScreenOff; from: number; to: number }[] = [];
+  let open: { state: ScreenOff; from: number } | null = null;
+  const close = (to: number) => {
+    const from = Math.max(0, open!.from), end = Math.min(Math.max(0, to), durationSec);
+    if (end - from >= MIN_GAP_SEC) gaps.push({ state: open!.state, from, to: end });
+    open = null;
+  };
+  for (const c of [...changes].sort((a, b) => a.t - b.t)) {
+    if (c.state in SCREEN_RANK) {
+      const st = c.state as ScreenOff;
+      if (!open) open = { state: st, from: c.t }; else if (SCREEN_RANK[st] > SCREEN_RANK[open.state]) open.state = st;
+    } else if (c.state === 'awake' && open) close(c.t);
+  }
+  if (open) close(durationSec);
+  return gaps;
+}
+
+/** "48s", "1m 52s", "1h 0m 5s". */
+export function spokenDuration(sec: number): string {
+  const t = Math.max(0, Math.round(sec)), h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), x = t % 60;
+  return h ? `${h}h ${m}m ${x}s` : m ? `${m}m ${x}s` : `${x}s`;
+}
+
+/** "0:45", "1:02:03": a position in the video. */
+function clock(sec: number): string {
+  const t = Math.max(0, Math.round(sec)), h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), x = String(t % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${x}` : `${m}:${x}`;
+}
+
+const GAP_WHAT: Record<ScreenOff, string> = { locked: 'the screen was locked', asleep: 'the displays were asleep', 'off-console': 'another user session had the screen' };
+
+/** One stop warning per stretch the screen was not drawn: how long, where in the video, and what it means. */
+export function screenGapWarnings(changes: ScreenChange[], durationSec: number): string[] {
+  return screenGaps(changes, durationSec).map((g) =>
+    `${GAP_WHAT[g.state]} for ${spokenDuration(g.to - g.from)} (${clock(g.from)} to ${clock(g.to)} in the video); that part of the video is frozen or blank`);
+}
+
+const SCREEN_NOW: Record<ScreenOff, string> = {
+  locked: 'the screen is locked: nothing is being captured until it is unlocked',
+  asleep: 'the displays are asleep: nothing is being captured until they wake',
+  'off-console': 'another user session is using the screen: nothing is being captured until you switch back',
+};
+
+/** The status note for the screen state the helper last reported; null while the screen is drawn. */
+export function screenStatusNote(screen: unknown): string | null {
+  return typeof screen === 'string' && screen in SCREEN_NOW ? `${SCREEN_NOW[screen as ScreenOff]} (the video holds the last frame meanwhile)` : null;
+}
+
+/** The helper's "screen" events, shifted from the recording clock to the video clock like the marks. */
+function screenChanges(logFile: string, offsetSec: number): ScreenChange[] {
+  const out: ScreenChange[] = [];
+  for (const e of logEvents(logFile) as { event?: string; state?: unknown; t?: unknown }[]) {
+    if (e.event === 'screen' && typeof e.state === 'string' && typeof e.t === 'number' && Number.isFinite(e.t)) out.push({ t: e.t - offsetSec, state: e.state });
+  }
+  return out;
 }
 
 function logLines(logFile: string): string[] {
@@ -225,9 +302,10 @@ async function finalize(s: RecordingState, deps: RecorderDeps, reason: string): 
     sidecar = `${base}.json`;
     writeSidecar(sidecar, { version: 1, target: s.target, startedAt: new Date(t0).toISOString(), durationSec, marks });
   }
+  const warnings = s.worker === 'mac' ? screenGapWarnings(screenChanges(log, offsetSec), durationSec) : [];  // before the log goes
   fs.rmSync(s.raw, { force: true });
   cleanupAux();
-  return { out, durationSec, sidecar, reason };
+  return { out, durationSec, sidecar, reason, ...(warnings.length ? { warnings } : {}) };
 }
 
 /** Finalises a dead recorder and keeps the outcome in state for the next status, stop or start. */
@@ -304,16 +382,37 @@ async function waitReady(worker: 'mac' | 'cdp', pid: number, logFile: string, de
   }
 }
 
+/** An empty, owner-only folder for the recorder's requests (see mac.recorderRoute). */
+function requestsDir(): string {
+  ensureStateDir();
+  const d = mac.requestsFolder();
+  fs.rmSync(d, { recursive: true, force: true });  // a crashed recording may have left requests behind
+  fs.mkdirSync(d, { mode: 0o700 });
+  return d;
+}
+
+/**
+ * How long the recorder waits after a `windows` listing quit. A screenrec-mac that used ScreenCaptureKit
+ * and quit stops the live streams of the same path a moment later (about 0.4 s seen on macOS 26.7), which
+ * could hit the new recorder's first stream.
+ */
+export const LISTING_SETTLE_MS = 1000;
+
 async function startMac(target: Target, base: string, o: StartOptions, deps: RecorderDeps, t0Ms: number, marksFile: string, logFile: string) {
   mac.assertMac(deps.platform);
-  const [displays, windows] = await Promise.all([deps.mac.listDisplays(), deps.mac.listWindows()]);
+  // Display and region targets need no window list, so no listing helper quits next to the recorder.
+  const needsWindows = target.kind !== 'display' && target.kind !== 'region';
+  const [displays, windows] = await Promise.all([deps.mac.listDisplays(), needsWindows ? deps.mac.listWindows() : Promise.resolve([])]);
+  const listed = deps.now();  // the listing helper has exited: execFile answers on its exit
   const { spec, label } = mac.resolveCaptureSpec(target, displays, windows, o.cursor);
+  if (needsWindows) { const wait = LISTING_SETTLE_MS - (deps.now() - listed); if (wait > 0) await deps.sleep(wait); }
   const raw = `${base}.rec.mov`;
   const follow = (target.kind === 'window' || target.kind === 'app') && target.followApp;
   const ignoreApps = target.kind === 'window' || target.kind === 'app' ? target.ignoreApps : [];
+  const requests = requestsDir();
   const pid = deps.mac.spawnRecord(spec, { out: raw, fps: o.fps, maxSeconds: o.maxMs / 1000, followApp: follow, ignoreApps,
-    ignorePids: deps.mac.ancestorPids(), marksFile, t0Ms, logFile });
-  return { pid, raw, label };
+    ignorePids: deps.mac.ancestorPids(), marksFile, t0Ms, logFile, requestsDir: requests });
+  return { pid, raw, label, requests };
 }
 
 /** Longest --max: 24 h. Far longer overflows setTimeout in the tab worker, which then stops at once. */
@@ -384,7 +483,7 @@ async function spawnAndWait(o: StartOptions, deps: RecorderDeps, warnings: strin
   }
   const out = `${base}.mp4`, marksFile = `${base}.marks.jsonl`, logFile = `${base}.rec.log`, t0Ms = deps.now();
   for (const f of [marksFile, logFile]) fs.rmSync(f, { force: true });
-  let pid: number, raw: string, label: string, worker: 'mac' | 'cdp';
+  let pid: number, raw: string, label: string, worker: 'mac' | 'cdp', requests: string | undefined;
 
   if (o.target.kind === 'tab') {
     const t = o.target;
@@ -401,18 +500,19 @@ async function spawnAndWait(o: StartOptions, deps: RecorderDeps, warnings: strin
       if (!hit) throw e;
       warnings.push(`Chrome remote debugging is off, so this records the Chrome window "${hit.title}" instead of the tab. ` +
         'Covering that window or switching its tab will freeze or change the recording. Enable chrome://inspect/#remote-debugging to record hidden tabs.');
-      ({ pid, raw, label } = await startMac({ kind: 'window', app: 'Google Chrome', title: hit.title, followApp: false, ignoreApps: [] }, base, o, deps, t0Ms, marksFile, logFile));
+      ({ pid, raw, label, requests } = await startMac({ kind: 'window', app: 'Google Chrome', title: hit.title, followApp: false, ignoreApps: [] }, base, o, deps, t0Ms, marksFile, logFile));
       worker = 'mac';
     }
   } else {
-    ({ pid, raw, label } = await startMac(o.target, base, o, deps, t0Ms, marksFile, logFile));
+    ({ pid, raw, label, requests } = await startMac(o.target, base, o, deps, t0Ms, marksFile, logFile));
     worker = 'mac';
     if (o.target.kind === 'display' || o.target.kind === 'region' || o.target.kind === 'display-of') {
       warnings.push('Display capture records notifications and every window on that display. Consider turning on a Focus mode, or record a --window instead.');
     }
   }
 
-  writeState({ pid, worker, target: o.target, label, raw, out, marksFile, meta: o.meta, startedAt: t0Ms, maxMs: o.maxMs, ...(o.out && o.force ? { force: true } : {}) });
+  writeState({ pid, worker, target: o.target, label, raw, out, marksFile, meta: o.meta, startedAt: t0Ms, maxMs: o.maxMs,
+    ...(requests ? { requests } : {}), ...(o.out && o.force ? { force: true } : {}) });
   try { await waitReady(worker, pid, logFile, deps); }
   catch (e) {
     if (pidExists(pid)) deps.signal(pid, 'SIGKILL');
@@ -448,6 +548,8 @@ export async function stopRecording(deps: RecorderDeps = realDeps): Promise<Stop
 
 export interface StatusResult {
   recording: boolean; elapsedSec?: number; out?: string; target?: string; text: string;
+  /** Mac recordings only, and only while the screen is not drawn: what the helper last saw. */
+  screen?: ScreenOff;
   /** Window and app recordings only: "hidden" while the helper holds the last frame (minimized, hidden or closed). */
   targetState?: 'visible' | 'hidden';
   recovered?: StopResult; recoveryError?: { code: ErrorCode; message: string; fix: string };
@@ -467,6 +569,13 @@ function targetState(s: RecordingState): 'visible' | 'hidden' | undefined {
   return 'visible';
 }
 
+/** The screen state from the helper's last "screen" event; undefined while drawn or for tab recordings. */
+function screenNow(s: RecordingState): ScreenOff | undefined {
+  if (s.worker !== 'mac') return undefined;
+  const ev = lastEvent(logOf(s), 'screen') as { state?: unknown } | undefined;
+  return typeof ev?.state === 'string' && ev.state in SCREEN_RANK ? ev.state as ScreenOff : undefined;
+}
+
 /** Running or idle. A dead recorder is finalised here (spec section 5) and the result kept for the next stop. */
 export async function recordingStatus(deps: RecorderDeps = realDeps): Promise<StatusResult> {
   let s = readState();
@@ -476,8 +585,10 @@ export async function recordingStatus(deps: RecorderDeps = realDeps): Promise<St
       const elapsedSec = Math.round((deps.now() - s.startedAt) / 100) / 10;
       const state = targetState(s);
       const held = state === 'hidden' ? ' (the window is hidden, minimized or closed: holding its last frame)' : '';
+      const screen = screenNow(s);
+      const note = screenStatusNote(screen);
       return { recording: true, elapsedSec, out: s.out, target: s.label ?? fallbackLabel(s.target), ...(state ? { targetState: state } : {}),
-        text: `recording ${elapsedSec} s to ${s.out}${held}` };
+        ...(screen ? { screen } : {}), text: `recording ${elapsedSec} s to ${s.out}${held}${note ? `; warning: ${note}` : ''}` };
     }
     let release: () => void;
     try { release = acquireStartLock(); } catch { return { recording: false, text: 'a recording is starting' }; }

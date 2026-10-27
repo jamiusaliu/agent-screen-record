@@ -5,13 +5,17 @@ usage: screenrec-mac <command> [flags]   (one JSON line per result or event on s
   displays                       list displays (points, global top-left coordinates)
   windows                        list layer-0 windows with z order
   permission [--request]         report (or request) Screen Recording permission
+  screen                         report the screen state: awake, locked, asleep or off-console (no ScreenCaptureKit call)
   screenshot <capture> --out F   write one frame as PNG
   record <capture> --out F.mov [--max-seconds N] [--marks F] [--t0-ms MS]
-         [--follow-app] [--ignore-pid PID ...] [--ignore-app NAME ...]
+         [--follow-app] [--ignore-pid PID ...] [--ignore-app NAME ...] [--requests DIR]
 capture: --window-id ID | --display-id ID [--region x,y,w,h], --size W,H (even), [--cursor], [--fps 1..120]
 record events: started {width,height}; first-frame {ms: epoch ms of the first written frame};
                switched {windowId,app,title}; warning {message} (also before started when the screen is locked, asleep or off console);
+               screen {state: "awake"|"locked"|"asleep"|"off-console", t: seconds since --t0-ms} on each change of screen state (also written as a mark);
                stopped {reason,frames,screen?: "locked"|"asleep"|"off-console" when no frames were written and the screen was not drawn}
+record --requests DIR: while recording, answers screenshot and windows requests: <id>.req holds {"args":[...]},
+               the answer (the line the command would print) is written to <id>.res
 exit codes: 0 ok; 1 error JSON on stdout; record also uses 5 = no frames were written,
             6 = the video file could not be written (folder missing or not writable, disk full, encoder failure)
 """
@@ -32,12 +36,14 @@ case "windows":
 case "permission":
     if args.bool("request") { _ = CGRequestScreenCaptureAccess() }
     emit(["ok": true, "granted": CGPreflightScreenCaptureAccess()])
+case "screen":
+    emit(["ok": true, "screen": screenState().rawValue])
 case "screenshot":
     await screenshot(args)
 case "record":
     await record(args)
 case "selftest", "selftest-follow":  // follow rules and writer ordering, no capture (used by the mac-smoke tests)
-    let cases = selftestFollow() + (await selftestRecorder()) + (await selftestScreen())
+    let cases = selftestFollow() + (await selftestRecorder()) + (await selftestScreen()) + (await selftestRequests())
     emit(["ok": cases.allSatisfy { $0["pass"] as? Bool == true }, "cases": cases])
 case "help", "--help", "":
     print(usage)

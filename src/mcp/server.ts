@@ -152,12 +152,13 @@ export function buildServer(): McpServer {
       max: z.string().optional().describe('Auto-stop after e.g. 90s, 10m (default), 1h; from 1s to 24h.'),
       no_meta: z.boolean().optional().describe('Skip the JSON sidecar (it holds window titles, URLs and step notes, which can be sensitive).') },
     start, 'start', none);
-  tool(s, 'record_status', 'Is a recording running? Shows target, elapsed time and output path; for a window or app recording, targetState is "hidden" while the window is minimized, hidden or closed (the last frame is held) and "visible" otherwise. Also finalises a crashed recording and reports it as recovered.', {}, status, 'status', none);
+  tool(s, 'record_status', 'Is a recording running? Shows target, elapsed time and output path; for a window or app recording, targetState is "hidden" while the window is minimized, hidden or closed (the last frame is held) and "visible" otherwise. screen is "locked", "asleep" or "off-console" while the Mac screen is not drawn (nothing is captured then; tell the user). Also finalises a crashed recording and reports it as recovered.', {}, status, 'status', none);
   tool(s, 'record_mark', 'Add a timestamped step note to the running recording, e.g. "clicked Download". Call after each meaningful step. Keep secrets out of notes: they are saved in the sidecar.',
     { text: z.string().describe('Short note of what you just did.') }, mark, 'mark', (a) => [String(a.text)]);
   tool(s, 'record_stop',
     'Stop and save the recording as mp4 (plus a JSON sidecar with step notes). After it returns, tell the user in chat that you stopped recording and give the saved file path. ' +
-    'Returns a preview frame so you can check it recorded the right thing; if not, say so and offer to redo it. "recovered": true means the recorder had crashed and the partial file was saved.',
+    'Returns a preview frame so you can check it recorded the right thing; if not, say so and offer to redo it. "recovered": true means the recorder had crashed and the partial file was saved. ' +
+    'warnings name stretches where the screen was locked or asleep (frozen or blank in the video): pass them on to the user.',
     {}, stop, 'stop', none,
     async (r) => preview(String(r.out), Math.max(0, Number(r.durationSec) / 2 || 0)));
   tool(s, 'screenshot', 'Save one PNG and return it. Prefer a window or tab target (tab needs url:<text> or title:<text>); a display or region also shows notifications and other windows.',

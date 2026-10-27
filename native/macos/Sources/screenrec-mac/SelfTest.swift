@@ -75,6 +75,26 @@ func selftestScreen() async -> [[String: Any]] {
     check("no displays, off console: names the other session, not permission", away.code == "E_TARGET_NOT_FOUND" && away.message.contains("another user session"), away.message)
     check("screen warning only when not awake", screenWarning(.awake) == nil && screenWarning(.locked) != nil && screenWarning(.asleep) != nil && screenWarning(.offConsole) != nil, "")
 
+    check("mark: lock, sleep and session switch are named", screenMark(from: .awake, to: .locked) == "screen locked"
+          && screenMark(from: .awake, to: .asleep) == "displays asleep" && screenMark(from: .awake, to: .offConsole) == "another user session took the screen", "")
+    check("mark: coming back names what ended", screenMark(from: .locked, to: .awake) == "screen unlocked"
+          && screenMark(from: .asleep, to: .awake) == "displays awake" && screenMark(from: .offConsole, to: .awake) == "back on this user session", "")
+    check("mark: no change, no mark", screenMark(from: .awake, to: .awake) == nil && screenMark(from: .locked, to: .locked) == nil, "")
+    check("mark: asleep then locked says locked", screenMark(from: .asleep, to: .locked) == "screen locked", "")
+
+    let lockedShot = noFrameFailure(.locked, onScreen: true, streamError: nil)
+    check("no frame, locked: says locked, fix unlocks", lockedShot.message.contains("the screen is locked") && lockedShot.fix.hasPrefix("Unlock the Mac"), lockedShot.message)
+    let display = noFrameFailure(.awake, onScreen: nil, streamError: nil)
+    check("no frame, display, awake: never blames minimizing or Spaces", !display.message.contains("minimized") && !display.message.contains("Space")
+          && display.message.contains("the display"), display.message)
+    let shown = noFrameFailure(.awake, onScreen: true, streamError: nil)
+    check("no frame, window on screen: never blames minimizing or Spaces", !shown.message.contains("minimized") && !shown.message.contains("Space"), shown.message)
+    let hidden = noFrameFailure(.awake, onScreen: false, streamError: nil)
+    check("no frame, window off screen: blames minimizing or Spaces", hidden.message.contains("minimized") && hidden.fix.hasPrefix("Un-minimize"), hidden.message)
+    let stopped = noFrameFailure(.awake, onScreen: true, streamError: "boom (d -3805)")
+    check("no frame, stream stopped: names the ScreenCaptureKit error", stopped.message.contains("boom (d -3805)") && !stopped.message.contains("minimized"), stopped.message)
+    check("no frame, lock wins over a stream error", noFrameFailure(.locked, onScreen: nil, streamError: "x").message.contains("locked"), "")
+
     check("retry: empty display list on an awake screen", shouldRetryQuery(failed: false, permission: false, displaysEmpty: true, wantsDisplay: true, state: .awake), "")
     check("retry: failed query on an awake screen", shouldRetryQuery(failed: true, permission: false, displaysEmpty: false, wantsDisplay: false, state: .awake), "")
     check("no retry: permission refused", !shouldRetryQuery(failed: true, permission: true, displaysEmpty: false, wantsDisplay: false, state: .awake), "")
@@ -96,5 +116,56 @@ func selftestScreen() async -> [[String: Any]] {
 
     let err = NSError(domain: "com.apple.ScreenCaptureKit.SCStreamErrorDomain", code: -3801, userInfo: [NSLocalizedDescriptionKey: "boom"])
     check("query errors name their domain and code", describe(err) == "boom (com.apple.ScreenCaptureKit.SCStreamErrorDomain -3801)", describe(err))
+    return cases
+}
+
+/// The request channel a running recorder serves (Requests.swift), without capturing anything: malformed
+/// and refused requests, the file rules, and the deadline text.
+func selftestRequests() async -> [[String: Any]] {
+    var cases: [[String: Any]] = []
+    func check(_ name: String, _ pass: Bool, _ got: Any) { cases.append(["name": name, "pass": pass, "got": got]) }
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("screenrec-selftest-req-\(getpid())").path
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(atPath: dir) }
+    let png = (dir as NSString).appendingPathComponent("x.png")
+    func code(_ r: [String: Any]) -> String { r["code"] as? String ?? "" }
+
+    let bad = await answerRequest(Data("not json".utf8), png: png)
+    check("request: not JSON is E_BAD_ARGS", code(bad) == "E_BAD_ARGS", bad)
+    let record = await answerRequest(Data(#"{"args":["record","--display-id","1"]}"#.utf8), png: png)
+    check("request: only screenshot and windows are served", code(record) == "E_BAD_ARGS" && (record["message"] as? String ?? "").contains("screenshot, windows"), record)
+    let size = await answerRequest(Data(#"{"args":["screenshot","--window-id","7","--size","801,500","--out","/tmp/elsewhere.png"]}"#.utf8), png: png)
+    check("request: bad flags are refused before any capture", code(size) == "E_BAD_ARGS" && (size["message"] as? String ?? "").contains("even"), size)
+    check("request: nothing written for a refused request", !FileManager.default.fileExists(atPath: png), "")
+
+    let existing = (dir as NSString).appendingPathComponent("taken.png")
+    FileManager.default.createFile(atPath: existing, contents: Data("keep".utf8))
+    check("served PNG never replaces a file", !writeNewFile(Data("new".utf8), at: existing)
+          && FileManager.default.contents(atPath: existing) == Data("keep".utf8), "")
+    let link = (dir as NSString).appendingPathComponent("link.png")
+    symlink(existing, link)
+    check("served PNG never follows a link", !writeNewFile(Data("new".utf8), at: link) && FileManager.default.contents(atPath: existing) == Data("keep".utf8), "")
+    let fresh = (dir as NSString).appendingPathComponent("fresh.png")
+    check("served PNG is a new owner-only file", writeNewFile(Data("new".utf8), at: fresh)
+          && ((try? FileManager.default.attributesOfItem(atPath: fresh)[.posixPermissions]) as? Int) == 0o600, "")
+    check("request files: own regular file yes, link no", isOwnFile(fresh) && !isOwnFile(link), "")
+
+    let locked = requestTimeoutFailure(.locked, seconds: 20), stuck = requestTimeoutFailure(.awake, seconds: 20)
+    check("request deadline: names the lock", locked.message.contains("within 20 s: the screen is locked") && (locked.fix ?? "").hasPrefix("Unlock the Mac"), locked.message)
+    check("request deadline, awake: names the recorder, not a permission dialog", stuck.message.contains("the running recorder") && !stuck.message.contains("permission"), stuck.message)
+
+    // The server loop: answers a request in name order, refuses a request that is a link, leaves no request behind.
+    let server = serveRequests(in: dir)
+    FileManager.default.createFile(atPath: (dir as NSString).appendingPathComponent("a.req.tmp"), contents: Data(#"{"args":["record"]}"#.utf8))
+    rename((dir as NSString).appendingPathComponent("a.req.tmp"), (dir as NSString).appendingPathComponent("a.req"))
+    symlink(existing, (dir as NSString).appendingPathComponent("b.req"))
+    let res = (dir as NSString).appendingPathComponent("a.res")
+    for _ in 0..<50 where !FileManager.default.fileExists(atPath: res) { try? await Task.sleep(nanoseconds: 20_000_000) }
+    try? await Task.sleep(nanoseconds: 200_000_000)
+    server.cancel()
+    let answered = FileManager.default.contents(atPath: res).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+    let left = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).filter { $0.hasSuffix(".req") || $0 == "b.res" }
+    check("server: answers a request with the command's error line", code(answered) == "E_BAD_ARGS", answered)
+    check("server: a linked request is removed unread and unanswered", left.isEmpty, left)
     return cases
 }

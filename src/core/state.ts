@@ -9,10 +9,12 @@ export interface RecordingState {
   marksFile: string; meta: boolean; startedAt: number; maxMs: number;
   /** Human label of the target, e.g. "Finder: Downloads" (states written before it existed lack it). */
   label?: string;
+  /** mac recorder: the folder it answers `windows` and `screenshot` requests in, so no second helper stops its stream. */
+  requests?: string;
   /** start had --force with --out: stop replaces an existing out (and sidecar) instead of picking a -2 name. */
   force?: boolean;
   /** Set once a dead recorder has been finalised (by status or start); the next stop or start reports it. */
-  recovered?: { out: string; durationSec: number; sidecar?: string; reason: string };
+  recovered?: { out: string; durationSec: number; sidecar?: string; reason: string; warnings?: string[] };
   /** Set when finalising a dead recorder failed; the next stop throws it, the next start warns with it. */
   recoveryError?: { code: ErrorCode; message: string; fix: string };
 }

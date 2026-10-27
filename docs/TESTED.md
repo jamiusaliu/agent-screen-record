@@ -61,6 +61,20 @@ Intermittent: three scenarios in a row on the first run (about 30 s) failed with
 | Full-screen app | PENDING | manual: Start --app on an app in full-screen mode, interact, stop. Was the content recorded? |  |
 | Monitor unplugged | PENDING | manual: Start --window on a window on the external display, unplug it, wait 3 s, stop. Was a playable file saved? |  |
 
+## Screenshot during a recording, and a lock mid-recording (27 Oct 2026)
+
+Machine: MacBookPro16,2 (x86_64), macOS 26.7.1. Found on 24 and 27 Oct with a probe that ran `status` and `screenshot --display main` every 5 s while `start --display main` recorded. Fixed in `fix(native): answer screenshots inside the running recorder` and `feat(status): report a lock in the middle of a recording`. FIXED-PENDING-LIVE-RECHECK rows are rerun by the coordinator with the user; the notes say what the fixer saw.
+
+| Check | Result | Note |
+|---|---|---|
+| Screenshot of the recorded target while recording (display recording, display screenshot) | FIXED-PENDING-LIVE-RECHECK | Before: E_NO_FRAMES "no frame within 3 s (is the window minimized or on another Space?)" on every try for 100+ s, unlocked. Cause reproduced with a harness TextEdit window instead of the display: a screenrec-mac process that used ScreenCaptureKit and quit stopped the recorder's stream ("application connection interrupted"), and the new screenshot stream got no sample. The fixer did not record the display. |
+| Screenshot of the recorded window while recording (harness TextEdit window, CLI under `caffeinate -d`) | FIXED-PENDING-LIVE-RECHECK | Fixer's runs of start, 3 screenshots, `list windows`, stop: before the fix 0 of 15 screenshots over 5 runs (E_NO_FRAMES, then E_HELPER_CRASHED) and 1 stream interruption per run; after, 12 of 12 at 1346x878 and no interruptions in 4 runs. |
+| `screenshot --display main` while a window recording runs | FIXED-PENDING-LIVE-RECHECK | Fixer's run: ok, 2880x1800 (checked by size only, deleted at once), recording uninterrupted (230 frames in 8 s). |
+| Lock in the middle of a recording | FIXED-PENDING-LIVE-RECHECK | Before: 3.6 min recording with about 2 min locked; status and stop said nothing. Now status should show `"screen":"locked"` with a warning, the sidecar "screen locked" / "screen unlocked" marks, and stop a `warnings` entry with the locked length. Covered by unit and MCP tests with simulated helper events; not seen on a real lock. |
+| "Your screen is being observed" on the lock screen | OBSERVED (user) | The user saw macOS show this notice on 27 Oct 2026 while a display recording ran during a lock. It is macOS's notice; screenrec does not draw it. |
+| Window listing quitting just before the recorder starts | KNOWN-RISK, mitigated | `start` lists windows with a short-lived helper, then starts the recorder from the same path; the quitting helper can stop the new stream about 0.4 s later. Since `fix(start)`, display and region targets skip the listing and other targets wait 1 s. This may explain the intermittent first-run failures in the 22 Oct matrix (unverified). |
+| Screenshot while locked | FIXED-PENDING-LIVE-RECHECK | Before: usually "the screen is locked" quickly, once a 30 s hang reported as "a macOS permission dialog may be waiting". Now refused before ScreenCaptureKit is asked, and any helper timeout names the locked screen. Not seen on a real lock. |
+
 ### Chrome checks with the user (2026-10-22, Chrome 156.0.8078.47, normal profile)
 
 | Check | Result | Note | Evidence (recordings/chrome/, local) |
