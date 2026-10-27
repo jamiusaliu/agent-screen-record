@@ -148,7 +148,12 @@ func selftestRequests() async -> [[String: Any]] {
     let fresh = (dir as NSString).appendingPathComponent("fresh.png")
     check("served PNG is a new owner-only file", writeNewFile(Data("new".utf8), at: fresh)
           && ((try? FileManager.default.attributesOfItem(atPath: fresh)[.posixPermissions]) as? Int) == 0o600, "")
-    check("request files: own regular file yes, link no", isOwnFile(fresh) && !isOwnFile(link), "")
+    check("request files: own regular file is read, a link never", readOwnFile(fresh) == Data("new".utf8) && readOwnFile(link) == nil, "")
+    let cap = ServedCaptures(limit: 2)
+    let first = cap.tryEnter(), second = cap.tryEnter(), third = cap.tryEnter()
+    cap.leave()
+    check("served captures: refused above the limit, room again after one ends", first && second && !third && cap.tryEnter(), "")
+    check("served captures: the busy answer says why", busyFailure(4).message.contains("already taking 4 screenshots"), busyFailure(4).message)
 
     let locked = requestTimeoutFailure(.locked, seconds: 20), stuck = requestTimeoutFailure(.awake, seconds: 20)
     check("request deadline: names the lock", locked.message.contains("within 20 s: the screen is locked") && (locked.fix ?? "").hasPrefix("Unlock the Mac"), locked.message)

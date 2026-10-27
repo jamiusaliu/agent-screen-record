@@ -25,9 +25,9 @@ func serveRequests(in dir: String, deadline: Double = requestDeadline) -> Task<V
             let names = ((try? fm.contentsOfDirectory(atPath: dir)) ?? []).filter { $0.hasSuffix(".req") }.sorted()
             for name in names where !Task.isCancelled {
                 let req = (dir as NSString).appendingPathComponent(name)
-                guard isOwnFile(req) else { unlink(req); continue }  // a link or another user's file: never followed
-                guard let data = fm.contents(atPath: req) else { continue }
+                let data = readOwnFile(req)  // nil for a link or another user's file, which is never followed
                 unlink(req)
+                guard let data else { continue }
                 answer(data, id: String(name.dropLast(4)), in: dir, deadline: deadline)
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
@@ -35,10 +35,27 @@ func serveRequests(in dir: String, deadline: Double = requestDeadline) -> Task<V
     }
 }
 
-/// A regular file (not a link) owned by this user.
-func isOwnFile(_ path: String) -> Bool {
+/// The contents of `path` when it is a regular file owned by this user, else nil. The checks run on the
+/// opened descriptor (O_NOFOLLOW, then fstat), so a link swapped in after a check is never read.
+func readOwnFile(_ path: String) -> Data? {
+    let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+    guard fd >= 0 else { return nil }
+    let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
     var st = stat()
-    return lstat(path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFREG && st.st_uid == getuid()
+    guard fstat(fd, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG, st.st_uid == getuid() else { return nil }
+    return (try? h.readToEnd()) ?? Data()
+}
+
+/// Served screenshots still running, stuck ones included: a capture that misses its deadline keeps its
+/// stream until ScreenCaptureKit lets go, so new ones are refused above `limit` instead of piling up.
+final class ServedCaptures: @unchecked Sendable {  // unchecked: `running` is guarded by `lock`
+    static let shared = ServedCaptures(limit: 4)
+    let limit: Int
+    private let lock = NSLock()
+    private var running = 0
+    init(limit: Int) { self.limit = limit }
+    func tryEnter() -> Bool { lock.lock(); defer { lock.unlock() }; guard running < limit else { return false }; running += 1; return true }
+    func leave() { lock.lock(); running -= 1; lock.unlock() }
 }
 
 /// Answers one request, or the deadline error if the work takes longer; whichever comes first is written.
@@ -68,6 +85,12 @@ func requestTimeoutFailure(_ state: ScreenState, seconds: Double) -> HelperFailu
                          fix: "Try again. If it keeps happening, stop the recording, run \"screenrec doctor\" and retry with SCREENREC_DEBUG=1.")
 }
 
+/// The answer when `limit` served screenshots are still running.
+func busyFailure(_ limit: Int) -> HelperFailure {
+    HelperFailure("E_HELPER_CRASHED", "the running recorder is already taking \(limit) screenshots (earlier ones may be stuck in ScreenCaptureKit)",
+                  fix: "Wait a few seconds and try again. If it keeps happening, stop the recording and start a new one.")
+}
+
 /// The result line for one request. Never exits: a failure becomes an error line, as the command would print.
 /// A screenshot goes to `png` (a new file), never to the request's --out.
 func answerRequest(_ data: Data, png: String) async -> [String: Any] {
@@ -81,6 +104,8 @@ func answerRequest(_ data: Data, png: String) async -> [String: Any] {
             do { content = try await queryContent(timeout: startTimeout(), stuck: .served) } catch { throw queryFailure(error) }
             return ["ok": true, "windows": windowDicts(content)]
         }
+        guard ServedCaptures.shared.tryEnter() else { return busyFailure(ServedCaptures.shared.limit).json }
+        defer { ServedCaptures.shared.leave() }
         return try await takeScreenshot(Args(argv), served: ServedShot(out: png))
     } catch let f as HelperFailure { return f.json }
     catch { return HelperFailure("E_HELPER_CRASHED", describe(error)).json }

@@ -4,13 +4,21 @@
 // can be timed from the first frame of the video.
 // Usage: node supervisor.js [--stdin] <logFile> <exe> [args...]. SIGINT and SIGTERM are forwarded to the recorder.
 // With --stdin, our stdin is piped to the recorder (it carries the config, which may hold a secret).
-import fs from 'node:fs';
+// A mac recorder's request folder (--requests) is emptied when it exits, so a screenshot it took for
+// another process never outlives the recording.
+import fs from 'node:fs'; import path from 'node:path';
 import { spawn } from 'node:child_process';
 
 const argv = process.argv.slice(2);
 const forwardStdin = argv[0] === '--stdin';
 const [logFile, exe, ...args] = forwardStdin ? argv.slice(1) : argv;
 const fd = fs.openSync(logFile, 'a');
+const at = args.indexOf('--requests');
+const requests = at !== -1 && path.basename(args[at + 1] ?? '') === 'requests' ? args[at + 1] : null;
+function clearRequests() {
+  if (!requests) return;
+  try { for (const n of fs.readdirSync(requests)) fs.rmSync(path.join(requests, n), { recursive: true, force: true }); } catch { /* already gone */ }
+}
 const write = (s: string) => { try { fs.writeSync(fd, s + '\n'); } catch { /* log gone */ } };
 
 function stamp(line: string): string {
@@ -39,5 +47,6 @@ process.on('SIGHUP', () => { /* outlive the terminal that started us */ });
 child.on('close', (code, signal) => {
   if (pending) write(stamp(pending));
   write(JSON.stringify({ event: 'exit', code, signal }));
+  clearRequests();
   process.exit(0);
 });

@@ -531,15 +531,17 @@ test('while recording, window listings go to the recorder; one that never answer
 test('the recorder starts only after a window listing has had time to quit; display targets list no windows', async () => {
   const events: string[] = [];
   const spy = (): RecorderDeps => deps({
-    sleep: async (ms) => { if (ms >= 100) events.push(`sleep ${ms}`); await realDeps.sleep(ms); },
+    sleep: async (ms) => { if (!events.includes('spawn')) events.push(`sleep ${ms}`); await realDeps.sleep(ms); },
     mac: { ...realDeps.mac,
       listWindows: async () => { events.push('windows'); return realDeps.mac.listWindows(); },
       spawnRecord: (spec, o) => { events.push('spawn'); return realDeps.mac.spawnRecord(spec, o); } },
   });
   await startRecording(opts(), spy());
-  assert.equal(events[0], 'windows'); assert.equal(events.at(-1), 'spawn');
-  const wait = Number(events.find((e) => e.startsWith('sleep'))?.split(' ')[1]);
-  assert.ok(wait > LISTING_SETTLE_MS - 300 && wait <= LISTING_SETTLE_MS, `settle wait ${wait}`);
+  // order, not wall-clock bounds (a busy machine can spend any time between the listing and the wait):
+  // the listing has finished, then the settle wait, then the recorder is spawned
+  assert.equal(events[0], 'windows'); assert.match(events[1], /^sleep /); assert.equal(events[2], 'spawn');
+  const wait = Number(events[1].split(' ')[1]);
+  assert.ok(wait > 0 && wait <= LISTING_SETTLE_MS, `settle wait ${wait}`);
   await sleep(300);
   await stopRecording(deps());
   events.length = 0;
@@ -547,4 +549,35 @@ test('the recorder starts only after a window listing has had time to quit; disp
   assert.deepEqual(events, ['spawn'], 'no window listing and no wait for a display');
   await sleep(300);
   await stopRecording(deps());
+});
+
+test('no screenshot a recorder took for a caller outlives the recording: stop, a recorder that exits, and crash recovery', async () => {
+  const leftovers = (dir: string) => { for (const f of ['1-2-3.png', '1-2-3.res', '4.req']) fs.writeFileSync(path.join(dir, f), 'x', { mode: 0o600 }); };
+  // stop
+  await startRecording(opts(), deps());
+  let dir = readState()!.requests!;
+  leftovers(dir);
+  await sleep(300);
+  await stopRecording(deps());
+  assert.deepEqual(fs.readdirSync(dir), [], 'stop empties it');
+  // the recorder ends on its own (as at --max): the supervisor empties it before anyone asks
+  process.env.FAKE_HELPER_MODE = 'target-closes';
+  await startRecording(opts(), deps());
+  dir = readState()!.requests!;
+  leftovers(dir);
+  await recorderGone();
+  assert.deepEqual(fs.readdirSync(dir), [], 'emptied when the recorder exited');
+  await recordingStatus(deps()); await stopRecording(deps());
+  // crash: recorder and supervisor killed together; the next status finalises and empties it
+  delete process.env.FAKE_HELPER_MODE;
+  await startRecording(opts(), deps());
+  dir = readState()!.requests!;
+  await sleep(300);
+  leftovers(dir);
+  process.kill(-readState()!.pid, 'SIGKILL');
+  await recorderGone();
+  assert.ok(fs.readdirSync(dir).length > 0, 'nothing ran to clean up yet');
+  await recordingStatus(deps());
+  assert.deepEqual(fs.readdirSync(dir), [], 'recovery empties it');
+  await stopRecording(deps()).catch(() => {});
 });

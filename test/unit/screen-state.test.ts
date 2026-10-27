@@ -29,6 +29,13 @@ test('a lock that was on when the recording started is no warning when the video
   assert.deepEqual(screenGaps([c(-12, 'locked'), c(8, 'awake')], 30), [{ state: 'locked', from: 0, to: 8 }]);
 });
 
+test('a one-second lock in the middle is reported; under a second, or starting within a second of stop, is not', () => {
+  // the 1 s poll: a real lock of 1 to 2 s measures one or two ticks
+  assert.deepEqual(screenGaps([c(10, 'locked'), c(11, 'awake')], 30), [{ state: 'locked', from: 10, to: 11 }]);
+  assert.deepEqual(screenGaps([c(10, 'locked'), c(10.6, 'awake')], 30), []);
+  assert.deepEqual(screenGaps([c(29.4, 'locked')], 30), []);
+});
+
 test('events out of order are sorted; awake without a lock and unknown states are ignored', () => {
   assert.deepEqual(screenGaps([c(9, 'awake'), c(2, 'awake'), c(4, 'locked'), c(5, 'garbage')], 10), [{ state: 'locked', from: 4, to: 9 }]);
   assert.deepEqual(screenGaps([], 10), []);

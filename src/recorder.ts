@@ -109,21 +109,28 @@ const SCREEN_RANK: Record<ScreenOff, number> = { asleep: 1, locked: 2, 'off-cons
 /** One "screen" event from the helper's log: the new state and when, in seconds on the video clock. */
 export interface ScreenChange { t: number; state: string }
 
-/** Shorter stretches are not reported: no one locks and unlocks a Mac that fast, so they are a lock that ended as the video began. */
-export const MIN_GAP_SEC = 1.5;
+/**
+ * The helper checks the screen once a second, so a stretch is measured in whole seconds, give or take one.
+ * A stretch under MIN_GAP_SEC (one check) is noise. One that began before the first frame must reach
+ * MIN_START_GAP_SEC: a recording started while locked gets its first frame at the unlock, and the unlock
+ * is seen up to a second later, so that is not lost video.
+ */
+export const MIN_GAP_SEC = 1;
+export const MIN_START_GAP_SEC = 1.5;
 
 /**
  * Stretches of the video (seconds) while the screen was not drawn, from the helper's "screen" events,
  * never from mark text (an agent may write the note "screen locked" itself). A stretch still open at
- * the end runs to `durationSec`; times before the first frame count from 0, and a stretch shorter than
- * MIN_GAP_SEC is dropped (a lock that was on when the recording started ends as the first frame arrives).
+ * the end runs to `durationSec`; times before the first frame count from 0. So a lock shorter than about
+ * a second, one that starts within about a second of stop, or one that was on at start and ends within
+ * about 1.5 s of the first frame may not be reported.
  */
 export function screenGaps(changes: ScreenChange[], durationSec: number): { state: ScreenOff; from: number; to: number }[] {
   const gaps: { state: ScreenOff; from: number; to: number }[] = [];
   let open: { state: ScreenOff; from: number } | null = null;
   const close = (to: number) => {
     const from = Math.max(0, open!.from), end = Math.min(Math.max(0, to), durationSec);
-    if (end - from >= MIN_GAP_SEC) gaps.push({ state: open!.state, from, to: end });
+    if (end - from >= (open!.from <= 0 ? MIN_START_GAP_SEC : MIN_GAP_SEC)) gaps.push({ state: open!.state, from, to: end });
     open = null;
   };
   for (const c of [...changes].sort((a, b) => a.t - b.t)) {
@@ -237,6 +244,7 @@ async function keepNoFfmpeg(deps: RecorderDeps, s: RecordingState, log: string, 
 
 async function finalize(s: RecordingState, deps: RecorderDeps, reason: string): Promise<StopResult> {
   clearState(); // first, so a failure below never blocks the next start
+  if (s.requests) mac.clearRequests(s.requests);  // the recorder is gone: drop any screenshot it took for a caller
   const log = logOf(s);
   const exitCode = lastEvent(log, 'exit')?.code;
   const stopped = lastEvent(log, 'stopped');

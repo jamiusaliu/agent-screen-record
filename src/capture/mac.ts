@@ -200,17 +200,24 @@ export async function screenshot(spec: CaptureSpec, out: string) {
   return r;
 }
 
-/** Moves a recorder-written PNG (only from the request folder) to `out`, which must not exist yet. */
+/**
+ * Moves a recorder-written PNG (only from the request folder) to `out`, which must not exist yet. The
+ * new file gets the usual mode (0666 less the umask), like any other screenshot; the recorder's 0600
+ * copy is removed whatever happens.
+ */
 export function takeServedPng(from: string, out: string, dir: string = requestsFolder()): void {
   if (path.dirname(from) !== dir || !/^[\w.-]+\.png$/.test(path.basename(from))) {
     throw new ScreenrecError('E_HELPER_CRASHED', `The recorder answered with an unexpected file: ${from}`, 'Re-run with SCREENREC_DEBUG=1 and report the output.');
   }
-  try { fs.linkSync(from, out); }
-  catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'EEXIST') { fs.rmSync(from, { force: true }); throw e; }
-    fs.copyFileSync(from, out, fs.constants.COPYFILE_EXCL);  // another volume: copy, still never replacing
-  }
-  fs.rmSync(from, { force: true });
+  try { fs.writeFileSync(out, fs.readFileSync(from), { flag: 'wx' }); }  // wx: never replaces, never follows a link
+  finally { fs.rmSync(from, { force: true }); }
+}
+
+/** Empties the request folder: no screenshot a recorder took for someone outlives its recording. */
+export function clearRequests(dir: string = requestsFolder()): void {
+  let names: string[];
+  try { names = fs.readdirSync(dir); } catch { return; }
+  for (const n of names) fs.rmSync(path.join(dir, n), { recursive: true, force: true });
 }
 
 function ppid(pid: number): number | null {

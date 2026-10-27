@@ -462,8 +462,10 @@ Changes made during the build and review, each decided with the user:
   session"), on the recording clock like other marks. The sidecar stays
   version 1; only marks are added. `stop` gives `warnings` with the length and
   position of each frozen or blank stretch, counted from the helper's `screen`
-  log events (not from mark text, so a step note cannot fake a lock); a stretch
-  under 1.5 s is not reported.
+  log events (not from mark text, so a step note cannot fake a lock). The state
+  is checked once a second, so a lock shorter than about a second, one that
+  starts within about a second of stop, or one already on at start that ends
+  within about 1.5 s of the first frame may not be reported.
 - While a mac recording runs, `screenshot` and window listings are answered by
   the recorder process itself (`record --requests`), each within 20 s. The
   recorder writes a requested PNG only into its 0700 request folder, as a new

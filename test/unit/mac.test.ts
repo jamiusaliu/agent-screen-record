@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { listDisplays, listWindows, permission, resolveCaptureSpec, captureArgs, recordArgs, ancestorPids, spawnRecord, helperJson, askRecorder, screenState, takeServedPng,
+import { listDisplays, listWindows, permission, resolveCaptureSpec, captureArgs, recordArgs, ancestorPids, spawnRecord, helperJson, askRecorder, screenState, takeServedPng, clearRequests,
   HELPER_MISSING_FIX, HELPER_FIXES, HELPER_EXIT, recordExitError, assertMac, type RecordOptions } from '../../src/capture/mac.ts';
 import { ScreenrecError } from '../../src/core/errors.ts';
 import type { Display } from '../../src/core/geometry.ts';
@@ -236,13 +236,27 @@ test('a recorder-written PNG is taken only from the request folder and never rep
     const req = path.join(dir, 'requests'); fs.mkdirSync(req);
     const shot = path.join(req, '1-2-3.png'); fs.writeFileSync(shot, 'png');
     const out = path.join(dir, '.out.tmp.png');
+    fs.chmodSync(shot, 0o600);  // as the recorder writes it
     takeServedPng(shot, out, req);
     assert.equal(fs.readFileSync(out, 'utf8'), 'png'); assert.ok(!fs.existsSync(shot), 'moved, not copied');
+    const usual = path.join(dir, 'usual.png'); fs.writeFileSync(usual, 'x');
+    assert.equal(fs.statSync(out).mode & 0o777, fs.statSync(usual).mode & 0o777, 'the same mode as any other new file (the umask), not 0600');
     fs.writeFileSync(shot, 'again');
     assert.throws(() => takeServedPng(shot, out, req), (e: NodeJS.ErrnoException) => e.code === 'EEXIST');
     assert.equal(fs.readFileSync(out, 'utf8'), 'png', 'the existing file is untouched');
+    assert.ok(!fs.existsSync(shot), 'the recorder copy is removed even when the move fails');
     const elsewhere = path.join(dir, 'secret.png'); fs.writeFileSync(elsewhere, 'x');
     assert.throws(() => takeServedPng(elsewhere, path.join(dir, 'b.png'), req), (e: ScreenrecError) => e.code === 'E_HELPER_CRASHED');
     assert.ok(fs.existsSync(elsewhere));
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('clearRequests empties the request folder and tolerates a missing one', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'srclr-'));
+  try {
+    for (const f of ['1.png', '1.res', '2.req', '3.res.tmp']) fs.writeFileSync(path.join(dir, f), 'x');
+    clearRequests(dir);
+    assert.deepEqual(fs.readdirSync(dir), []);
+    clearRequests(path.join(dir, 'missing'));
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
