@@ -1,6 +1,6 @@
 ## Screen recording (screenrec)
 
-macOS only (v1). Needs Node 22+ and ffmpeg (`brew install ffmpeg`). Install with `npm i -g agent-screen-record` (the command is `screenrec`; until the first npm release, build it from source as the README describes), or run any command as `npx -y agent-screen-record@0.1.0 <cmd>` (pinned to a release, so agents never run whatever npm serves as latest).
+macOS only (v1). Needs Node 22+ and ffmpeg (`brew install ffmpeg`). Install with `npm i -g agent-screen-record` (the command is `screenrec`), or run any command as `npx -y agent-screen-record@0.1.0 <cmd>` (pinned to a release, so agents never run whatever npm serves as latest).
 
 To record what you do, use the `screenrec` CLI. It records locally; nothing is uploaded. Tell the user in chat when you start and stop recording and what it captures. It only watches: do the work with your usual tools.
 

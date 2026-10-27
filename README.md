@@ -25,9 +25,17 @@ It ships as one npm package with three front ends: the `screenrec` CLI, an MCP s
 - To build from source: Swift (Xcode or the Command Line Tools) for the macOS capture helper.
 - For hidden Chrome tabs: Chrome 144 or newer (see [Chrome](#chrome)).
 
-### Now: build from source
+### From npm
 
-**The package is not published to npm yet**, so `npm i -g agent-screen-record` and every `npx agent-screen-record` command below does not work today. Install from a checkout:
+```sh
+npm i -g agent-screen-record
+```
+
+The package is `agent-screen-record` (the npm name `screenrec` belongs to an unrelated package); the command it installs is `screenrec`.
+
+### Build from source
+
+To run your own build or change the code, install from a checkout:
 
 ```sh
 git clone https://github.com/jamiusaliu/agent-screen-record.git agent-screen-record && cd agent-screen-record
@@ -36,14 +44,6 @@ npm install -g .
 ```
 
 `npm run build` compiles the TypeScript to `dist/`; `npm run build:native` compiles the macOS capture helper (`bin/screenrec-mac`). `npm install -g .` links the checkout, so the `screenrec` command runs it.
-
-### After the package is published to npm
-
-```sh
-npm i -g agent-screen-record
-```
-
-The package is `agent-screen-record` (the npm name `screenrec` belongs to an unrelated package); the command it installs is `screenrec`.
 
 ### Check the setup
 
@@ -59,9 +59,9 @@ The first window, display or region capture makes macOS ask for Screen Recording
 
 ## Use it from your agent
 
-### Now: point your agent at the `screenrec` you built
+### Point your agent at the installed `screenrec`
 
-After [building from source](#now-build-from-source), register `screenrec mcp` as an MCP server. The examples below assume the client finds `screenrec`, `node` and `ffmpeg` on its `PATH`; if it does not, see [When the app cannot find screenrec](#when-the-app-cannot-find-screenrec).
+After `npm i -g agent-screen-record` (or [building from source](#build-from-source)), register `screenrec mcp` as an MCP server. The examples below assume the client finds `screenrec`, `node` and `ffmpeg` on its `PATH`; if it does not, see [When the app cannot find screenrec](#when-the-app-cannot-find-screenrec).
 
 Claude Code:
 
@@ -109,9 +109,7 @@ GUI apps such as Claude Desktop and Cursor often start MCP servers with a shorte
 
 Find each path in your shell: `which node`, `which ffmpeg` and `which ffprobe`; the second argument is `bin/screenrec` inside your checkout. With nvm, `which node` points into a version folder, so update the path when you switch Node versions.
 
-### After the package is published to npm
-
-These routes fetch the package from npm, so they fail until it is published.
+### Without a global install: the plugin or npx
 
 Claude Code plugin (adds the MCP server and a `screen-record` skill that tells the agent how to record: start before acting, use the narrowest target, add step notes, stop, squeeze, offer a GIF):
 
@@ -120,7 +118,7 @@ Claude Code plugin (adds the MCP server and a `screen-record` skill that tells t
 /plugin install screenrec@agent-screen-record
 ```
 
-The plugin runs the server with `npx -y agent-screen-record@0.1.0 mcp`, pinned to the plugin's version, so even a plugin added from a local checkout needs the published package. A global install makes the first start faster.
+The plugin runs the server with `npx -y agent-screen-record@0.1.0 mcp`, pinned to the plugin's version, so even a plugin added from a local checkout runs the published package. A global install makes the first start faster.
 
 Any MCP client, without a global install:
 

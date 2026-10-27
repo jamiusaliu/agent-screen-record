@@ -324,7 +324,7 @@ async function mcpHandshake(screenrec, cwd, env, readme) {
   check(code === 0, `screenrec mcp exits 0 when stdin closes (${code})`);
 }
 
-// "Now: build from source" as the README writes it; the GitHub URL becomes the clean clone above.
+// "Build from source" as the README writes it; the GitHub URL becomes the clean clone above.
 async function sourceRoute(src, version, readme) {
   const block = [...readme.matchAll(/^```sh\n([\s\S]*?)^```/gm)].map((m) => m[1]).find((b) => b.includes(`git clone ${REPO_URL}.git`) && /npm install -g \./.test(b));
   if (!check(Boolean(block), 'README has the build-from-source block')) return;
