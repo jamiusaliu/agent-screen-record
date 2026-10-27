@@ -1,0 +1,12 @@
+{
+  "numStartups": 3,
+  "mcpServers": {
+    "github": { "type": "http", "url": "https://example.test/mcp", "headers": { "Authorization": "Bearer FIXTURE_SECRET_HEADER" } },
+    "chrome-devtools": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp@latest", "--autoConnect", "--no-usage-statistics", "--no-performance-crux"],
+      "env": { "API_KEY": "FIXTURE_SECRET_ENV" }
+    }
+  }
+}

@@ -1,0 +1,1 @@
+{ "name": "chrome-devtools-mcp", "version": "1.11.0", "description": "fixture", "mcpServers": { "chrome-devtools": { "command": "npx", "args": ["chrome-devtools-mcp@1.11.0"] } } }

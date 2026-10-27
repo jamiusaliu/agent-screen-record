@@ -1,0 +1,10 @@
+<!doctype html><title>SCREENREC COLOUR</title>
+<body style="margin:0;height:100vh;background:#000">
+<script>
+const grey = location.search.includes('grey');
+const colours = grey ? ['#000000', '#404040', '#808080', '#c0c0c0', '#ffffff']
+  : ['#ff0000', '#00ff00', '#0000ff', '#ffff00', '#00ffff', '#ff00ff', '#ffffff', '#808080'];
+let i = 0;
+window.__changes = 0;  // tests wait on this instead of wall time
+setInterval(() => { document.body.style.background = colours[i++ % colours.length]; window.__changes++; }, 500);
+</script>

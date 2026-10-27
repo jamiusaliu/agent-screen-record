@@ -1,0 +1,2 @@
+#!/usr/bin/env node
+import('../dist/cli/main.js').then(async (m) => process.exit(await m.main(process.argv.slice(2))));

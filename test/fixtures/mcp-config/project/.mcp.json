@@ -1,0 +1,1 @@
+{ "mcpServers": { "cdt": { "command": "npx", "args": ["chrome-devtools-mcp@1.11.0"], "env": { "SECRET": "FIXTURE_SECRET_ENV" } } } }

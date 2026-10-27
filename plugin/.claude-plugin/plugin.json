@@ -1,0 +1,8 @@
+{
+  "name": "screenrec",
+  "version": "0.1.0",
+  "description": "Record what the agent does in any window, app, display or Chrome tab, then squeeze, crop, blur and export it. Local only.",
+  "author": { "name": "Saliu Jamiu Olamilekan" },
+  "license": "MIT",
+  "keywords": ["screen-recording", "mcp", "chrome", "gif", "video"]
+}

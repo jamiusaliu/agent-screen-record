@@ -1,0 +1,7 @@
+node_modules/
+dist/
+bin/screenrec-mac
+native/macos/.build/
+recordings/
+*.log
+.cache/

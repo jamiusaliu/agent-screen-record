@@ -1,0 +1,1 @@
+{ "mcpServers": { "screenrec": { "command": "npx", "args": ["-y", "agent-screen-record@0.1.0", "mcp"] } } }

@@ -1,0 +1,7 @@
+{
+  "mcpServers": {},
+  "projects": {
+    "/work/app": { "mcpServers": { "browser": { "command": "node", "args": ["/opt/chrome-devtools-mcp/build/src/index.js"], "env": { "TOKEN": "FIXTURE_SECRET_ENV" } } } },
+    "/work/other": { "mcpServers": { "devtools": { "command": "npx", "args": ["chrome-devtools-mcp", "--autoConnect"] } } }
+  }
+}

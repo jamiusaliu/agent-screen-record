@@ -1,0 +1,24 @@
+model = "o4"  # a comment with [mcp_servers.fake] in it
+
+[mcp_servers.docs]
+command = "npx"
+args = ["-y", "some-docs-mcp"]
+
+[mcp_servers."chrome devtools"]
+command = 'npx'
+args = [
+  "-y",
+  "chrome-devtools-mcp@latest", # pinned later
+  "--auto-connect",
+]
+
+[mcp_servers."chrome devtools".env]
+CHROME_TOKEN = "FIXTURE_SECRET_ENV"
+args = ["not", "these", "chrome-devtools-mcp"]
+
+[profiles.x]
+command = "chrome-devtools-mcp"
+
+[mcp_servers.inline-env]
+command = "chrome-devtools-mcp"
+env = { CI = "FIXTURE_SECRET_ENV", OTHER = "x" }

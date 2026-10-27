@@ -1,0 +1,14 @@
+{
+  "name": "agent-screen-record",
+  "owner": { "name": "Saliu Jamiu Olamilekan" },
+  "metadata": { "description": "screenrec: let AI agents record windows, apps, displays and Chrome tabs, then clean the recording up. Local only." },
+  "plugins": [
+    {
+      "name": "screenrec",
+      "source": "./plugin",
+      "description": "Record what the agent does in any window, app, display or Chrome tab, then squeeze, crop, blur and export it. Local only.",
+      "version": "0.1.0",
+      "license": "MIT"
+    }
+  ]
+}

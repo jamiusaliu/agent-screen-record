@@ -1,0 +1,51 @@
+{
+  "name": "agent-screen-record",
+  "version": "0.1.0",
+  "description": "Let AI agents record windows, apps, displays and Chrome tabs, then clean the recording up. Local only.",
+  "license": "MIT",
+  "author": "Saliu Jamiu Olamilekan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jamiusaliu/agent-screen-record.git"
+  },
+  "homepage": "https://github.com/jamiusaliu/agent-screen-record#readme",
+  "bugs": {
+    "url": "https://github.com/jamiusaliu/agent-screen-record/issues"
+  },
+  "type": "module",
+  "bin": {
+    "screenrec": "bin/screenrec"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "plugin",
+    "agents"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:native": "node scripts/build-native.mjs",
+    "prepack": "npm run build && node scripts/build-native.mjs --universal",
+    "test": "node --import tsx --test \"test/unit/**/*.test.ts\" \"test/security/**/*.test.ts\"",
+    "test:video": "node --import tsx --test \"test/video/**/*.test.ts\"",
+    "test:chrome": "node --import tsx --test --test-concurrency=1 \"test/chrome/**/*.test.ts\"",
+    "test:mcp": "node --import tsx --test \"test/mcp/**/*.test.ts\"",
+    "test:mac-smoke": "node --import tsx --test --test-concurrency=1 --test-timeout=60000 \"test/mac-smoke/**/*.test.ts\"",
+    "test:mac": "node test/mac-matrix/run.mjs",
+    "test:cleanroom": "node test/cleanroom/run.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@puppeteer/browsers": "^3.2.5",
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.7"
+  }
+}
